@@ -1,0 +1,1834 @@
+-- Wire Atelier / native LT2 placement export
+-- Run as a client-side Luau script in a live LT2 session. Owned boxes are used first; missing boxes can be bought.
+-- In click mode, click the ground where the artwork's bottom center should stand.
+-- First run selects the spot, previews, and checks inventory. Set COMMIT to true and run again to use that exact spot.
+local COMMIT = true
+local AUTO_BUY_MISSING = true
+local FALLBACK_UNAVAILABLE = true
+local POSITION_MODE = "click"
+local ROTATE_DEGREES = 0
+local MIN_PLACEMENT_INTERVAL = 1.5
+local TEAM_ROLE = "solo"
+local TEAM_SESSION = ""
+local TEAM_SECRET = ""
+local TEAM_PEER = ""
+local TEAM_FILTER = {}
+local TEAM_PLAN_HASH = "3a3a5d4c"
+local TEAM_RELAY_URL = "http://127.0.0.1:8765/v1"
+local MAX_WIRE_LENGTH = 60
+local ART_LIFT = 3.25
+local MAX_BOXES_PER_RUN = 50000
+local PREVIEW_NAME = "WireAtelierPreview"
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local oldPanel=player:WaitForChild("PlayerGui"):FindFirstChild("WireAtelierStatus")
+if oldPanel then oldPanel:Destroy() end
+local stopped=false
+local statusGui=Instance.new("ScreenGui")
+statusGui.Name="WireAtelierStatus";statusGui.ResetOnSpawn=false;statusGui.DisplayOrder=100
+local statusFrame=Instance.new("Frame")
+statusFrame.AnchorPoint=Vector2.new(1,0);statusFrame.Position=UDim2.new(1,-18,0,18)
+statusFrame.Size=UDim2.fromOffset(360,96);statusFrame.BackgroundColor3=Color3.fromRGB(17,30,35)
+statusFrame.BorderSizePixel=0;statusFrame.Parent=statusGui
+local accent=Instance.new("Frame")
+accent.Size=UDim2.new(0,4,1,0);accent.BackgroundColor3=Color3.fromRGB(200,251,98)
+accent.BorderSizePixel=0;accent.Parent=statusFrame
+local title=Instance.new("TextLabel")
+title.Position=UDim2.fromOffset(16,8);title.Size=UDim2.new(1,-94,0,21)
+title.BackgroundTransparency=1;title.Font=Enum.Font.GothamBold;title.TextSize=15
+title.TextXAlignment=Enum.TextXAlignment.Left;title.TextColor3=Color3.fromRGB(230,247,222)
+title.Text="WIRE ATELIER";title.Parent=statusFrame
+local stopButton=Instance.new("TextButton")
+stopButton.Size=UDim2.fromOffset(58,22);stopButton.Position=UDim2.new(1,-70,0,8)
+stopButton.Text="STOP";stopButton.Font=Enum.Font.GothamBold;stopButton.TextSize=12
+stopButton.BackgroundColor3=Color3.fromRGB(115,45,45);stopButton.TextColor3=Color3.new(1,1,1)
+stopButton.Parent=statusFrame
+stopButton.Activated:Connect(function()stopped=true;stopButton.Text="STOPPED" end)
+local detail=Instance.new("TextLabel")
+detail.Position=UDim2.fromOffset(16,33);detail.Size=UDim2.new(1,-24,0,58)
+detail.BackgroundTransparency=1;detail.Font=Enum.Font.Gotham;detail.TextSize=12
+detail.TextWrapped=true;detail.TextXAlignment=Enum.TextXAlignment.Left
+detail.TextYAlignment=Enum.TextYAlignment.Top;detail.TextColor3=Color3.fromRGB(166,206,198)
+detail.Parent=statusFrame
+statusGui.Parent=player.PlayerGui
+local function status(message)
+  detail.Text=tostring(message)
+  print("Wire Atelier:",message)
+end
+-- WIRE PLACEMENT MIXIN V2
+-- BEGIN TOOL MIXINS V2
+local ToolMixins = (function()
+    local environment = type(getgenv) == "function" and getgenv() or _G
+    local pool = environment.__HUX_TOOL_MIXINS_V2
+    if not pool or pool.version ~= 2 then pool = {version = 2} end
+    if pool.GhostVersion ~= "32fdd7aaf9ce" then
+        if pool.Ghost then pool.Ghost:Stop(true) end
+        pool.Ghost = (function()
+-- Local visual proxy only. Never assign player.Character or touch real movement properties.
+local Ghost = {Config = {Enabled = true, WalkSpeed = 16, SprintSpeed = 48}}
+local player, RunService, UserInputService
+local ghostMode = {}
+local startGhost, stopGhost
+local function status(message) if Ghost.Config.Status then pcall(Ghost.Config.Status, message) end end
+local ghostButton
+local function ghostFocus(g,focused)
+    g.focused=focused
+    if not focused then
+        g.sprintArmed=false;g.mouseHeld=false
+        if g.humanoid then
+            g.humanoid.WalkSpeed=Ghost.Config.WalkSpeed
+            g.humanoid:Move(Vector3.zero,false)
+            g.humanoid.Jump=false
+        end
+    end
+end
+local function ghostDragging(g)
+    return g.mouseHeld or (UserInputService.IsMouseButtonPressed and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))
+end
+local function ghostSprint(g,down)
+    if not g.focused then return false end
+    if ghostDragging(g) or UserInputService:GetFocusedTextBox() then g.sprintArmed=false;return false end
+    if UserInputService:IsKeyDown(Enum.KeyCode.R) or UserInputService:IsKeyDown(Enum.KeyCode.T) then g.sprintArmed=false;return false end
+    if not down then g.sprintArmed=false end
+    return down and g.sprintArmed==true
+end
+local function ghostInput(g,input)
+            if input.UserInputType==Enum.UserInputType.MouseButton1 or input.KeyCode==Enum.KeyCode.R or input.KeyCode==Enum.KeyCode.T then
+                if input.UserInputType==Enum.UserInputType.MouseButton1 then g.mouseHeld=true end
+                g.sprintArmed=false;g.humanoid.WalkSpeed=Ghost.Config.WalkSpeed
+            elseif g.focused and not ghostDragging(g) and not UserInputService:GetFocusedTextBox() and (input.KeyCode==Enum.KeyCode.LeftShift or input.KeyCode==Enum.KeyCode.RightShift) then g.sprintArmed=true end
+end
+local function ghostDirection(camera)
+    if UserInputService:GetFocusedTextBox() then return Vector3.zero, false end
+    local function down(key) return UserInputService:IsKeyDown(Enum.KeyCode[key]) end
+    local x = (down("D") and 1 or 0) - (down("A") and 1 or 0)
+    local z = (down("W") and 1 or 0) - (down("S") and 1 or 0)
+    local forward = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+    if forward.Magnitude < .001 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
+    local right = forward:Cross(Vector3.yAxis)
+    local direction = right * x + forward * z
+    if direction.Magnitude > 1 then direction = direction.Unit end
+    return direction, down("LeftShift") or down("RightShift")
+end
+stopGhost = function()
+    local g = ghostMode.active
+    if not g then return end
+    ghostMode.active = nil
+    for _, connection in ipairs(g.connections) do connection:Disconnect() end
+    if g.bound then game:GetService("ContextActionService"):UnbindAction("ButterGhostMovement") end
+    if g.controlsDisabled then pcall(function() g.controls:Enable() end) end
+    for part, transparency in pairs(g.hidden) do
+        if part.Parent then part.LocalTransparencyModifier = transparency end
+    end
+    if g.camera and g.camera.Parent and g.camera.CameraSubject == g.humanoid then
+        g.camera.CameraSubject = g.subject
+        g.camera.CameraType = g.cameraType
+    end
+    for _, track in pairs(g.tracks) do pcall(function() track:Stop(0); track:Destroy() end) end
+    if g.model then g.model:Destroy() end
+    if ghostButton and ghostButton.Parent then ghostButton.Text = ghostMode.enabled and "AUTO GHOST: ON | SHIFT SPRINT" or "AUTO GHOST: OFF" end
+end
+startGhost = function()
+    player = game:GetService("Players").LocalPlayer
+    RunService = game:GetService("RunService")
+    UserInputService = game:GetService("UserInputService")
+    if ghostMode.active then return true end
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local camera = workspace.CurrentCamera
+    if not root or not humanoid or humanoid.Health <= 0 or not camera then
+        status("Load a living character before enabling ghost mode"); return
+    end
+    local archived = character.Archivable
+    character.Archivable = true
+    local copied, model = pcall(function() return character:Clone() end)
+    character.Archivable = archived
+    if not copied or not model then status("Could not create the local ghost"); return end
+    local g = {character = character, model = model, camera = camera, subject = camera.CameraSubject,
+        cameraType = camera.CameraType, hidden = {}, connections = {}, tracks = {}, position = root.Position,
+        rotation = root.CFrame.Rotation, focused = true}
+    ghostMode.active = g
+    local ok, problem = pcall(function()
+        local ids = {}
+        local animate = character:FindFirstChild("Animate")
+        for _, name in ipairs({"idle", "walk", "jump", "fall"}) do
+            local folder = animate and animate:FindFirstChild(name)
+            local animation = folder and folder:FindFirstChildWhichIsA("Animation", true)
+            ids[name] = animation and animation.AnimationId
+        end
+        for _, child in ipairs(model:GetDescendants()) do
+            if child:IsA("LuaSourceContainer") or child:IsA("Tool") then child:Destroy() end
+        end
+        g.root = assert(model:FindFirstChild("HumanoidRootPart"), "Ghost root missing")
+        g.humanoid = assert(model:FindFirstChildOfClass("Humanoid"), "Ghost Humanoid missing")
+        model.Name = "ButterLocalGhost"
+        model.PrimaryPart = g.root
+        for _, part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = part.Name == "Torso" or part.Name == "UpperTorso" or part.Name == "LowerTorso" or part.Name == "Head"; part.CanTouch = false; part.CanQuery = false
+                part.LocalTransparencyModifier = 0; part.Anchored = false
+                part.AssemblyLinearVelocity = Vector3.zero; part.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+        g.humanoid.AutoRotate = true
+        g.humanoid.WalkSpeed = Ghost.Config.WalkSpeed
+        g.humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+        model.Parent = workspace
+        -- Preserve the model pivot's original offset from its HRP.
+        g.pivotOffset = g.root.CFrame:ToObjectSpace(model:GetPivot())
+        model:PivotTo(root.CFrame * g.pivotOffset)
+        local animator = g.humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", g.humanoid)
+        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do track:Stop(0) end
+        for name, id in pairs(ids) do
+            local animation = Instance.new("Animation"); animation.AnimationId = id
+            local loaded, track = pcall(animator.LoadAnimation, animator, animation)
+            animation:Destroy()
+            if loaded then track.Looped = name ~= "jump"; g.tracks[name] = track end
+        end
+        local function hide(part)
+            if part:IsA("BasePart") then
+                if g.hidden[part] == nil then g.hidden[part] = part.LocalTransparencyModifier end
+                part.LocalTransparencyModifier = 1
+            end
+        end
+        for _, part in ipairs(character:GetDescendants()) do hide(part) end
+        table.insert(g.connections, character.DescendantAdded:Connect(hide))
+        camera.CameraType = Enum.CameraType.Custom; camera.CameraSubject = g.humanoid
+        game:GetService("ContextActionService"):BindActionAtPriority("ButterGhostMovement", function()
+            return Enum.ContextActionResult.Sink
+        end, false, 3000, Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D,
+            Enum.KeyCode.Space, Enum.KeyCode.LeftControl, Enum.KeyCode.RightControl,
+            Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift)
+        g.bound = true
+        local scripts = player:FindFirstChild("PlayerScripts")
+        local module = scripts and scripts:FindFirstChild("PlayerModule")
+        if module then
+            local obtained, controls = pcall(function() return require(module):GetControls() end)
+            if obtained and controls and controls.controlsEnabled ~= false then
+                g.controls = controls
+                g.controlsDisabled = true
+                controls:Disable()
+            end
+        end
+        table.insert(g.connections, UserInputService.WindowFocusReleased:Connect(function() ghostFocus(g,false) end))
+        table.insert(g.connections, UserInputService.WindowFocused:Connect(function() ghostFocus(g,true) end))
+        table.insert(g.connections, UserInputService.InputBegan:Connect(function(input)
+            ghostInput(g,input)
+        end))
+        table.insert(g.connections, UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType==Enum.UserInputType.MouseButton1 then g.mouseHeld=false;g.sprintArmed=false;g.humanoid.WalkSpeed=Ghost.Config.WalkSpeed end
+            if input.KeyCode==Enum.KeyCode.LeftShift or input.KeyCode==Enum.KeyCode.RightShift then
+                g.sprintArmed=false;g.humanoid.WalkSpeed=Ghost.Config.WalkSpeed
+            end
+        end))
+        table.insert(g.connections, humanoid.Died:Connect(function() Ghost:Stop(false) end))
+        table.insert(g.connections, player.CharacterRemoving:Connect(function() Ghost:Stop(false) end))
+        table.insert(g.connections, workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() Ghost:Stop(false) end))
+        table.insert(g.connections, RunService.RenderStepped:Connect(function(dt)
+            if player.Character ~= character or not model.Parent or not g.root.Parent then Ghost:Stop(false); return end
+            local direction, sprint = ghostDirection(camera)
+            sprint=ghostSprint(g,sprint)
+            if not g.focused then direction = Vector3.zero end
+            -- Normal Humanoid locomotion supplies gravity, floors, slopes and jumping.
+            g.humanoid.WalkSpeed = sprint and Ghost.Config.SprintSpeed or Ghost.Config.WalkSpeed
+            g.humanoid:Move(direction, false)
+            g.humanoid.Jump = g.focused and not UserInputService:GetFocusedTextBox()
+                and UserInputService:IsKeyDown(Enum.KeyCode.Space)
+            local movementState = g.humanoid:GetState()
+            local mode = direction.Magnitude > .001 and "walk" or "idle"
+            if movementState == Enum.HumanoidStateType.Jumping then mode = "jump"
+            elseif movementState == Enum.HumanoidStateType.Freefall then mode = "fall" end
+            if g.animation ~= mode then
+                g.animation = mode
+                for name, track in pairs(g.tracks) do
+                    if name == mode then track:Play(.15, 1, 1); track:AdjustSpeed(1) else track:Stop(.15) end
+                end
+            end
+        end))
+        if ghostButton then ghostButton.Text = "AUTO GHOST: WALKING | SHIFT SPRINT" end
+        status("Walk normally with WASD, Space to jump, Shift to sprint. You return here when the move finishes.")
+    end)
+    if not ok then Ghost:Stop(false); status("Ghost failed: " .. tostring(problem)) end
+    return ok
+end
+
+-- Job scopes are lazy: merely scheduling a task does not create an avatar.
+local contexts = setmetatable({}, {__mode = "k"})
+local owners = {}
+local nativeTask = task
+function Ghost:Configure(options)
+    for key, value in pairs(options or {}) do
+        if key == "Enabled" then self.Config.Enabled = value == true
+        elseif key == "WalkSpeed" or key == "SprintSpeed" then
+            assert(type(value) == "number" and value == value and value >= 1 and value <= 150, "Ghost speed must be 1..150")
+            self.Config[key] = value
+        elseif key == "Status" then assert(value == nil or type(value) == "function"); self.Config.Status = value end
+    end
+end
+function Ghost:GetRootCFrame()
+    local g = ghostMode.active
+    return g and g.root and g.root.Parent and g.root.CFrame or nil
+end
+function Ghost:GetRoot() return ghostMode.active and ghostMode.active.root end
+function Ghost:IsActive() return ghostMode.active ~= nil end
+function Ghost:Stop(handoff)
+    local g = ghostMode.active
+    if handoff and g and player.Character == g.character then
+        local root = g.character:FindFirstChild("HumanoidRootPart")
+        local humanoid = g.character:FindFirstChildOfClass("Humanoid")
+        if root and g.root and g.root.Parent and humanoid and humanoid.Health > 0 and not humanoid.SeatPart then
+            root.CFrame = g.root.CFrame
+            root.AssemblyLinearVelocity = Vector3.zero; root.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+    owners = {}
+    stopGhost()
+end
+function Ghost:Begin(owner)
+    if not self.Config.Enabled then return nil end
+    owner = owner or contexts[coroutine.running()] or {}
+    if owners[owner] then return owner end
+    if not ghostMode.active and not startGhost() then error("Could not start local walking view", 2) end
+    owners[owner] = true
+    return owner
+end
+function Ghost:Finish(owner)
+    if not owner or not owners[owner] then return end
+    owners[owner] = nil
+    if next(owners) == nil then self:Stop(true) end
+end
+local function scope(callback, eager, separate, ...)
+    local thread = coroutine.running()
+    if contexts[thread] and not separate then
+        if eager then Ghost:Begin(contexts[thread]) end
+        return callback(...)
+    end
+    local previous = contexts[thread]
+    local owner = {}; contexts[thread] = owner
+    local args = table.pack(...)
+    local result = table.pack(pcall(function()
+        if eager then Ghost:Begin(owner) end
+        return callback(table.unpack(args, 1, args.n))
+    end))
+    contexts[thread] = previous
+    Ghost:Finish(owner)
+    if not result[1] then error(result[2], 0) end
+    return table.unpack(result, 2, result.n)
+end
+function Ghost:Run(callback, ...) return scope(callback, true, false, ...) end
+function Ghost:Scope(callback, ...) return scope(callback, false, false, ...) end
+function Ghost:Job(callback, ...) return scope(callback, true, true, ...) end
+function Ghost:Wrap(callback)
+    return function(...) return self:Run(callback, ...) end
+end
+function Ghost:Tasks(original)
+    return setmetatable({spawn = function(callback, ...)
+        if type(callback) ~= "function" then return original.spawn(callback, ...) end
+        local args = table.pack(...)
+        return original.spawn(function() return scope(callback, false, false, table.unpack(args, 1, args.n)) end)
+    end, defer = function(callback, ...)
+        if type(callback) ~= "function" then return original.defer(callback, ...) end
+        local args = table.pack(...)
+        return original.defer(function() return scope(callback, false, false, table.unpack(args, 1, args.n)) end)
+    end, delay = function(seconds, callback, ...)
+        local args = table.pack(...)
+        return original.delay(seconds, function() return scope(callback, false, false, table.unpack(args, 1, args.n)) end)
+    end}, {__index = original})
+end
+local fallbackOwner, fallbackVersion = {}, 0
+function Ghost:BeforeTeleport(candidate)
+    if not self.Config.Enabled then return end
+    player = player or game:GetService("Players").LocalPlayer
+    local character = player and player.Character
+    if not character or candidate ~= character:FindFirstChild("HumanoidRootPart") then return end
+    local owner = contexts[coroutine.running()]
+    if owner then self:Begin(owner); return end
+    -- Render/heartbeat callback teleports have no enclosing task; debounce their release.
+    if not self:Begin(fallbackOwner) then return end
+    fallbackVersion = fallbackVersion + 1
+    local version = fallbackVersion
+    nativeTask.delay(1, function() if version == fallbackVersion then self:Finish(fallbackOwner) end end)
+end
+return Ghost
+
+end)()
+        pool.GhostVersion = "32fdd7aaf9ce"
+    end
+    if not pool.Moving then pool.Moving = (function()
+-- Shared lasso transport, v1. Target is always the model pivot (or BasePart CFrame).
+local CodexItemTP = (function()
+    local api, busy = {}, setmetatable({}, {__mode = "k"})
+    local function alive(v) return v and v.Parent ~= nil end
+    local function parts(v)
+        if v:IsA("BasePart") then return {v} end
+        local out = {}
+        for _, p in ipairs(v:GetDescendants()) do
+            if p:IsA("BasePart") then table.insert(out, p) end
+        end
+        return out
+    end
+    local function pivot(v) return v:IsA("Model") and v:GetPivot() or v.CFrame end
+    local function protected(v)
+        local n = string.lower(v.Name)
+        if n:find("pumpkin", 1, true) or n:find("pumkin", 1, true) then return true end
+        if v:IsA("Seat") or v:IsA("VehicleSeat") or v:IsA("Humanoid") then return true end
+        if n == "woodsection" or n == "treeclass" or n == "woodclass" then return true end
+        if v:IsA("StringValue") then
+            local value = string.lower(v.Value)
+            if value:find("pumpkin", 1, true) or value:find("pumkin", 1, true) then return true end
+        end
+        return false
+    end
+    function api.eligible(v)
+        if not alive(v) or not (v:IsA("Model") or v:IsA("BasePart")) then return false end
+        local ancestor = v
+        while ancestor and ancestor ~= workspace do
+            if protected(ancestor) or ancestor.Name == "LogModels" then return false end
+            ancestor = ancestor.Parent
+        end
+        local count = 0
+        for _, d in ipairs(v:GetDescendants()) do
+            if protected(d) then return false end
+            if d:IsA("BasePart") then
+                if d.Anchored then return false end
+                count = count + 1
+            end
+        end
+        if v:IsA("BasePart") then return not v.Anchored end
+        return count > 0
+    end
+    function api.move(v, target, cancelled, timeout)
+        cancelled = cancelled or function() return false end
+        if not api.eligible(v) then return false, "item uses its original transport" end
+        if typeof(target) ~= "CFrame" then return false, "invalid destination CFrame" end
+        if type(isnetworkowner) ~= "function" then return false, "isnetworkowner is unavailable" end
+        local deadline = os.clock() + (timeout or 3)
+        while busy[v] do
+            if cancelled() then return false, "stopped" end
+            if os.clock() >= deadline then return false, "item is already moving" end
+            task.wait()
+        end
+        busy[v] = true
+        local saved, original, root, returnCF, approached = {}, nil, nil, nil, false
+        local function owns()
+            if not alive(v) then return false end
+            local seen = {}
+            for _, s in ipairs(saved) do
+                if not alive(s.part) then return false end
+                local assembly = s.part.AssemblyRootPart or s.part
+                if not seen[assembly] then
+                    seen[assembly] = true
+                    local ok, owned = pcall(isnetworkowner, assembly)
+                    if assembly.Anchored or not ok or not owned then return false end
+                end
+            end
+            return #saved > 0
+        end
+        local function write(cf)
+            for _, s in ipairs(saved) do
+                if alive(s.part) then
+                    s.part.CanCollide = false
+                    s.part.AssemblyLinearVelocity = Vector3.zero
+                    s.part.AssemblyAngularVelocity = Vector3.zero
+                end
+            end
+            if v:IsA("Model") then v:PivotTo(cf) else v.CFrame = cf end
+        end
+        local ok, success, reason = pcall(function()
+            original = pivot(v)
+            for _, p in ipairs(parts(v)) do table.insert(saved, {part = p, collide = p.CanCollide}) end
+            local player = game:GetService("Players").LocalPlayer
+            local character = player and player.Character
+            root = character and character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local interaction = game:GetService("ReplicatedStorage"):FindFirstChild("Interaction")
+            local dragging = interaction and interaction:FindFirstChild("ClientIsDragging")
+            local hold, observe, nextPulse = 0.04, 0.04, 0
+            while os.clock() < deadline do
+                if cancelled() then return false, "stopped" end
+                if not alive(v) then return false, "item disappeared" end
+                if not owns() then
+                    if root and alive(root) and (root.Position - saved[1].part.Position).Magnitude > 25 then
+                        if humanoid and humanoid.SeatPart then return false, "item is outside drag range; move the truck closer" end
+                        if not approached then returnCF = root.CFrame; approached = true end
+                        if api.Ghost then api.Ghost:BeforeTeleport(root) end; root.CFrame = saved[1].part.CFrame * CFrame.new(0, 3, 0)
+                        root.AssemblyLinearVelocity = Vector3.zero
+                        root.AssemblyAngularVelocity = Vector3.zero
+                        task.wait(0.04)
+                    end
+                    if cancelled() then return false, "stopped" end
+                    if os.clock() >= nextPulse then
+                        if not dragging then return false, "drag remote is unavailable" end
+                        dragging:FireServer(v)
+                        nextPulse = os.clock() + 0.04
+                    end
+                end
+                if owns() then
+                    local settle = math.min(deadline, os.clock() + hold)
+                    repeat
+                        if cancelled() then return false, "stopped" end
+                        if not owns() then break end
+                        write(target)
+                        task.wait()
+                    until os.clock() >= settle
+                    -- Observe with no corrective writes, so snapback cannot be hidden.
+                    task.wait(observe)
+                    if cancelled() then return false, "stopped" end
+                    if not alive(v) then return false, "item disappeared" end
+                    local delta = target:ToObjectSpace(pivot(v))
+                    local _, angle = delta:ToAxisAngle()
+                    if owns() and delta.Position.Magnitude <= 1 and math.abs(angle) <= math.rad(3) then
+                        write(target)
+                        delta = target:ToObjectSpace(pivot(v))
+                        local _, exactAngle = delta:ToAxisAngle()
+                        if delta.Position.Magnitude <= 0.025 and math.abs(exactAngle) <= math.rad(0.5) then return true end
+                    end
+                    hold, observe = math.min(0.18, hold + 0.04), math.min(0.1, observe + 0.02)
+                end
+                task.wait()
+            end
+            return false, "ownership/move timed out"
+        end)
+        local errorReason = not ok and tostring(success) or reason
+        success = ok and success == true
+        if not success and original and alive(v) then pcall(write, original) end
+        for _, s in ipairs(saved) do
+            if alive(s.part) then
+                pcall(function()
+                    s.part.CanCollide = s.collide
+                    s.part.AssemblyLinearVelocity = Vector3.zero
+                    s.part.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end
+        end
+        if approached and alive(root) then
+            pcall(function()
+                local character = game:GetService("Players").LocalPlayer.Character
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                if character and character:FindFirstChild("HumanoidRootPart") == root and not (humanoid and humanoid.SeatPart) then
+                    if api.Ghost then api.Ghost:BeforeTeleport(root) end; root.CFrame = returnCF
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                end
+            end)
+        end
+        busy[v] = nil
+        return success, errorReason
+    end
+    return api
+end)()
+
+return CodexItemTP
+
+end)() end
+    if not pool.Placing then pool.Placing = (function()
+-- Placement retry orchestration. Tool adapters supply protocol and geometry checks.
+local Placing = {}
+
+function Placing.run(spec)
+    assert(type(spec.send) == "function" and type(spec.observe) == "function", "placement needs send and observe callbacks")
+    local cancelled = spec.cancelled or function() return false end
+    local deadline = os.clock() + math.max(0, spec.timeout or 15)
+    local interval = math.max(0.04, spec.interval or 0.12)
+    local poll = math.max(0.01, math.min(interval, spec.poll or 0.04))
+    local attempts, nextSend = 0, 0
+    local candidate, candidateSince
+    local function observe()
+        local result = spec.observe()
+        if result then
+            if candidate ~= result then candidate, candidateSince = result, os.clock() end
+            if os.clock() - candidateSince >= (spec.stableFor or 0.04) then return result end
+        else
+            candidate, candidateSince = nil, nil
+        end
+    end
+    while os.clock() < deadline do
+        if cancelled() then return false, nil, "Stopped", attempts end
+        local result = observe()
+        if cancelled() then return false, nil, "Stopped", attempts end
+        if result then return true, result, nil, attempts end
+        -- A candidate suppresses further sends while its confirmation settles.
+        if not candidate and os.clock() >= nextSend
+            and (not spec.maxAttempts or spec.maxAttempts == 0 or attempts < spec.maxAttempts)
+            and (not spec.ready or spec.ready()) then
+            if spec.waitRate and spec.waitRate() == false then return false, nil, "Stopped", attempts end
+            if cancelled() then return false, nil, "Stopped", attempts end
+            if os.clock() >= deadline then break end
+            -- A rate limiter can yield. Recheck replication before firing again.
+            result = observe()
+            if cancelled() then return false, nil, "Stopped", attempts end
+            if result then return true, result, nil, attempts end
+            if not candidate and (not spec.ready or spec.ready()) then
+                attempts = attempts + 1
+                if spec.onAttempt then spec.onAttempt(attempts) end
+                if cancelled() then return false, nil, "Stopped", attempts end
+                local ok, accepted, why = pcall(spec.send, attempts)
+                if not ok then return false, nil, tostring(accepted), attempts end
+                if accepted == false then return false, nil, why or "Placement request failed", attempts end
+                nextSend = os.clock() + interval
+            end
+        end
+        task.wait(math.min(poll, math.max(0, deadline - os.clock())))
+    end
+    if cancelled() then return false, nil, "Stopped", attempts end
+    -- Accept an acknowledgement that reached its settling threshold at deadline.
+    local result = observe()
+    if cancelled() then return false, nil, "Stopped", attempts end
+    if result then return true, result, nil, attempts end
+    return false, nil, "Placement timed out waiting for matching server geometry", attempts
+end
+
+function Placing.poseMatches(actual, target, distance, degrees)
+    if not actual or not target then return false end
+    local delta = target:ToObjectSpace(actual)
+    local _, angle = delta:ToAxisAngle()
+    return delta.Position.Magnitude <= (distance or 0.1) and math.abs(angle) <= math.rad(degrees or 1)
+end
+
+function Placing.wireMatches(model, points, tolerance)
+    local function endpoint(name)
+        local part = model:FindFirstChild(name, true)
+        if not part then return nil end
+        if part:IsA("Attachment") then return part.WorldPosition end
+        if part:IsA("BasePart") then return part.Position end
+        if part:IsA("Vector3Value") then return part.Value end
+    end
+    local a, b = endpoint("End1"), endpoint("End2")
+    if not a or not b or not points or #points < 2 then return false end
+    local first, last = points[1], points[#points]
+    local direct = math.max((a - first).Magnitude, (b - last).Magnitude)
+    local reverse = math.max((a - last).Magnitude, (b - first).Magnitude)
+    return math.min(direct, reverse) <= (tolerance or 0.1)
+end
+
+function Placing.findResult(parent, original, before, predicate)
+    for _, model in ipairs(parent:GetChildren()) do
+        if model:IsA("Model") and (model == original or not before[model]) and predicate(model) then return model end
+    end
+end
+
+return Placing
+
+end)() end
+    pool.Moving.Ghost = pool.Ghost
+    pool.Moving._ghostMove = pool.Moving._ghostMove or pool.Moving.move
+    if pool.Moving._ghostBinding ~= pool.Ghost then
+        pool.Moving.move = pool.Ghost:Wrap(pool.Moving._ghostMove)
+        pool.Moving._ghostBinding = pool.Ghost
+    end
+    environment.__HUX_TOOL_MIXINS_V2 = pool
+    return pool
+end)()
+local CodexItemTP = ToolMixins.Moving
+local CodexPlacing = ToolMixins.Placing
+-- END TOOL MIXINS V2
+
+-- BEGIN GHOST JOB HOOKS
+local __HuxGhost = (type(getgenv) == "function" and getgenv() or _G).__HUX_TOOL_MIXINS_V2.Ghost
+local task = __HuxGhost:Tasks(task)
+-- END GHOST JOB HOOKS
+
+local function run()
+status("Loading the wire plan...")
+local planJson = [==[{"v":1,"s":"manga-style-drawing-of-a-girl-with-headphones-an","w":20,"h":13.333,"f":[],"p":[["Wire",26,26,0.2]],"b":[],"a":[[1,false,-4.019048,2.643723,6.057143,0,[[-4.019048,6.057143,0],[-2.152381,5.904762,0],[-1.085714,5.52381,0],[-0.438095,5.028571,0],[0.704762,3.771429,0],[1.2,3.314286,0],[1.657143,3.2,0],[0.666667,3.504762,0],[0.895238,2.285714,0],[1.504762,1.828571,0],[2.266667,1.485714,0],[3.333333,1.257143,0],[4.971429,1.371429,0],[6.228571,1.942857,0],[6.761905,2.628571,0],[6.609524,2.019048,0],[6.114286,1.447619,0],[4.742857,0.761905,0],[6.152381,0.571429,0],[7.257143,0.114286,0],[7.790476,-0.419048,0],[8.666667,-0.952381,0],[9.352381,-1.790476,0],[9.580952,-2.47619,0],[9.542857,-3.2,0],[9.2,-2.285714,0],[9.2,-2.742857,0],[8.780952,-3.352381,0],[9.2,-4.114286,0],[9.27619,-4.952381,0],[9.085714,-5.638095,0],[8.742857,-6.171429,0],[8.361905,-6.47619,0],[8.666667,-5.904762,0],[8.666667,-5.219048,0],[8.4,-4.571429,0],[8.019048,-4.190476,0],[6.952381,-3.733333,0],[7.257143,-4.419048,0],[7.295238,-5.333333,0],[6.87619,-6.095238,0],[7.066667,-5.638095,0],[7.066667,-5.104762,0],[6.761905,-4.419048,0],[6.038095,-3.809524,0],[5.085714,-3.542857,0],[5.695238,-4.457143,0],[5.847619,-5.104762,0],[5.733333,-6.209524,0],[5.27619,-6.666667,0],[5.733333,-5.828571,0],[5.733333,-4.990476,0],[5.27619,-3.92381,0],[4.47619,-3.27619,0],[3.333333,-2.971429,0],[2.643723,-2.626623,0]]],[1,false,2.643723,2.424055,-2.626623,0,[[2.643723,-2.626623,0],[2.266667,-2.438095,0],[1.009524,-1.257143,0],[1.504762,-1.790476,0],[2.380952,-2.438095,0],[3.485714,-2.971429,0],[6.838095,-3.580952,0],[8.4,-4.342857,0],[8.704762,-4.952381,0],[8.742857,-6.057143,0],[9.009524,-5.447619,0],[9.009524,-4.838095,0],[8.857143,-4.304762,0],[9.085714,-4.87619,0],[9.047619,-5.447619,0],[9.161905,-4.457143,0],[8.933333,-3.695238,0],[8.285714,-2.895238,0],[7.257143,-2.247619,0],[6.380952,-1.904762,0],[4.057143,-1.409524,0],[3.028571,-1.028571,0],[4.590476,-1.371429,0],[7.180952,-1.371429,0],[7.866667,-1.485714,0],[8.666667,-1.714286,0],[9.085714,-2.019048,0],[9.504762,-2.552381,0],[9.238095,-1.790476,0],[8.780952,-1.180952,0],[8.019048,-0.609524,0],[7.104762,-0.228571,0],[3.142857,0.342857,0],[2.152381,0.685714,0],[1.238095,1.295238,0],[1.619048,1.028571,0],[2.685714,0.8,0],[4.171429,0.72381,0],[5.695238,1.257143,0],[6.342857,1.790476,0],[6.571429,2.171429,0],[5.695238,1.52381,0],[4.019048,1.142857,0],[2.424055,1.347672,0]]],[1,false,2.424055,-0.958021,1.347672,0,[[2.424055,1.347672,0],[1.314286,1.828571,0],[0.895238,2.133333,0],[1.352381,1.561905,0],[0.590476,2.133333,0],[1.657143,0.8,0],[3.219048,-0.190476,0],[4.514286,-0.647619,0],[7.447619,-1.180952,0],[8.514286,-1.67619,0],[7.066667,-1.142857,0],[4.552381,-0.72381,0],[3.409524,-0.342857,0],[1.92381,0.495238,0],[0.47619,1.866667,0],[0.666667,1.066667,0],[1.466667,0.114286,0],[0.857143,0.685714,0],[0.361905,1.561905,0],[-0.628571,0.571429,0],[-0.32381,-0.304762,0],[0.32381,-1.485714,0],[1.238095,-2.780952,0],[3.104762,-4.266667,0],[3.714286,-4.914286,0],[4.247619,-5.828571,0],[4.361905,-6.666667,0],[4.019048,-5.561905,0],[3.180952,-4.609524,0],[3.485714,-5.447619,0],[3.485714,-6.133333,0],[3.333333,-6.628571,0],[1.733333,-6.666667,0],[2.152381,-5.409524,0],[2,-4.228571,0],[1.466667,-3.12381,0],[0.552381,-1.942857,0],[-0.171429,-0.761905,0],[-0.780952,0.495238,0],[-0.958021,-0.016293,0]]],[1,false,-0.958021,-4.019048,-0.016293,0,[[-0.958021,-0.016293,0],[-1.12381,-0.495238,0],[-0.857143,-1.447619,0],[-1.2,-0.609524,0],[-0.857143,-1.866667,0],[-0.4,-2.590476,0],[0.895238,-3.847619,0],[0.4,-2.857143,0],[1.161905,-4.038095,0],[1.390476,-4.838095,0],[1.428571,-5.6,0],[1.12381,-6.666667,0],[0.47619,-6.666667,0],[-0.4,-6.4,0],[-1.314286,-5.904762,0],[-1.809524,-5.447619,0],[-1.542857,-6.666667,0],[-1.885714,-5.561905,0],[-2,-4.457143,0],[-2.190476,-3.885714,0],[-2.533333,-3.390476,0],[-2.952381,-3.2,0],[-3.790476,-3.314286,0],[-5.542857,-4.533333,0],[-5.085714,-4.72381,0],[-5.733333,-4.72381,0],[-7.066667,-5.52381,0],[-7.257143,-6.666667,0],[-7.180952,-5.333333,0],[-7.409524,-4.952381,0],[-7.409524,-4.152381,0],[-7.980952,-3.657143,0],[-8.285714,-3.2,0],[-8.590476,-2.552381,0],[-8.704762,-1.904762,0],[-8.780952,-2.857143,0],[-8.552381,-3.847619,0],[-8.133333,-4.571429,0],[-7.447619,-5.142857,0],[-8.552381,-4.8,0],[-9.2,-4.266667,0],[-9.657143,-3.12381,0],[-9.542857,-1.790476,0],[-8.971429,-0.419048,0],[-7.714286,1.67619,0],[-7.219048,3.390476,0],[-6.685714,4.495238,0],[-5.580952,5.561905,0],[-4.666667,5.942857,0],[-4.019048,6.057143,0]]],[1,false,-4.057143,-4.057143,5.942857,0,[[-4.057143,5.942857,0],[-4.704762,5.828571,0],[-5.580952,5.447619,0],[-6.533333,4.533333,0],[-7.066667,3.542857,0],[-7.67619,1.52381,0],[-8.971429,-0.761905,0],[-9.27619,-2.133333,0],[-9.2,-3.27619,0],[-8.819048,-4.114286,0],[-7.980952,-4.87619,0],[-8.4,-4.380952,0],[-8.742857,-3.657143,0],[-8.895238,-2.742857,0],[-8.857143,-2.171429,0],[-8.209524,-0.380952,0],[-7.371429,1.066667,0],[-8.057143,-0.190476,0],[-8.4,-1.180952,0],[-8.438095,-2.247619,0],[-8.247619,-2.971429,0],[-7.752381,-3.733333,0],[-7.104762,-4.266667,0],[-6.152381,-4.647619,0],[-5.390476,-4.685714,0],[-6.304762,-4.228571,0],[-7.180952,-3.238095,0],[-7.52381,-2.171429,0],[-7.485714,-0.571429,0],[-7.447619,-1.942857,0],[-7.142857,-2.704762,0],[-6.914286,-2.361905,0],[-7.066667,-1.638095,0],[-6.952381,-0.038095,0],[-6.914286,-1.180952,0],[-6.647619,-2.133333,0],[-6.07619,-1.295238,0],[-6.609524,-0.342857,0],[-5.771429,-1.371429,0],[-6.533333,0.190476,0],[-6.8,1.257143,0],[-6.72381,2.133333,0],[-6.190476,2.666667,0],[-6.228571,3.2,0],[-5.504762,2.971429,0],[-6.304762,3.2,0],[-6.114286,3.809524,0],[-5.504762,4.761905,0],[-4.666667,5.485714,0],[-3.866667,5.828571,0],[-3.295238,5.904762,0],[-4.057143,5.942857,0]]],[1,false,-3.028571,-3.787915,5.485714,0,[[-3.028571,5.485714,0],[-3.714286,5.295238,0],[-4.666667,4.685714,0],[-5.27619,3.428571,0],[-6.038095,3.771429,0],[-5.314286,3.542857,0],[-5.961905,3.847619,0],[-6.190476,3.314286,0],[-5.390476,3.161905,0],[-5.12381,2.590476,0],[-4.933333,3.619048,0],[-4.4,4.342857,0],[-4.857143,3.619048,0],[-5.047619,2.933333,0],[-5.085714,1.67619,0],[-4.895238,2.704762,0],[-4.933333,1.904762,0],[-4.742857,1.333333,0],[-4.819048,0.8,0],[-5.047619,0.304762,0],[-5.542857,0.038095,0],[-4.742857,1.219048,0],[-4.32381,0.609524,0],[-3.790476,0.266667,0],[-4.247619,1.333333,0],[-4.285714,2.47619,0],[-3.942857,3.619048,0],[-3.638095,3.961905,0],[-4.057143,3.161905,0],[-4.247619,2.32381,0],[-4.095238,0.990476,0],[-3.638095,0.152381,0],[-4.247619,0.457143,0],[-4.628571,0.87619,0],[-4.780952,0.419048,0],[-4.361905,-0.190476,0],[-4.895238,0.114286,0],[-4.857143,-1.066667,0],[-5.390476,-0.571429,0],[-5.695238,0.114286,0],[-6.114286,0.266667,0],[-6.533333,0.838095,0],[-6.152381,0.609524,0],[-5.961905,1.790476,0],[-6.533333,2.171429,0],[-5.885714,1.752381,0],[-5.847619,0.952381,0],[-6.342857,0.533333,0],[-5.92381,0.304762,0],[-5.428571,0.495238,0],[-5.238095,0.952381,0],[-5.238095,1.714286,0],[-5.428571,2.285714,0],[-5.771429,2.628571,0],[-6.228571,2.590476,0],[-6.571429,2.285714,0],[-6.72381,1.790476,0],[-6.495238,0.304762,0],[-5.847619,-1.028571,0],[-5.2,-1.714286,0],[-3.980952,-2.019048,0],[-3.447619,-2.32381,0],[-3.787915,-2.020302,0]]],[1,false,-3.787915,-3.028571,-2.020302,0,[[-3.787915,-2.020302,0],[-4.857143,-1.066667,0],[-3.371429,-2.247619,0],[-3.295238,-1.752381,0],[-3.066667,-1.219048,0],[-2.419048,-1.485714,0],[-1.542857,-0.87619,0],[-1.047619,-0.342857,0],[-0.819048,0.609524,0],[-0.438095,1.447619,0],[-0.819048,0.952381,0],[-0.742857,1.447619,0],[-1.2,0.609524,0],[-1.27619,1.638095,0],[-1.352381,1.219048,0],[-1.085714,1.638095,0],[-0.628571,1.52381,0],[-0.285714,1.790476,0],[-0.742857,2.552381,0],[-0.438095,1.866667,0],[-0.971429,2.095238,0],[-1.733333,2.438095,0],[-2.457143,2.971429,0],[-2.571429,3.390476,0],[-1.847619,2.590476,0],[-0.780952,2.095238,0],[-1.314286,2.819048,0],[-0.666667,2.095238,0],[-1.085714,3.047619,0],[-1.2,4.114286,0],[-0.933333,2.895238,0],[-0.285714,1.904762,0],[0.209524,1.52381,0],[0.514286,2.171429,0],[0.438095,3.161905,0],[0.742857,2.552381,0],[0.514286,3.580952,0],[0.171429,4,0],[0.704762,3.542857,0],[1.085714,3.390476,0],[-0.780952,5.142857,0],[-1.695238,5.333333,0],[-2.342857,5.6,0],[-2.685714,5.333333,0],[-2.914286,4.914286,0],[-2.952381,3.809524,0],[-2.609524,2.857143,0],[-2.228571,2.666667,0],[-1.771429,2.133333,0],[-2.8,2.666667,0],[-3.52381,2.666667,0],[-2.533333,2.666667,0],[-2.838095,3.161905,0],[-2.952381,3.733333,0],[-3.752381,2.780952,0],[-2.990476,3.771429,0],[-2.990476,4.87619,0],[-2.571429,5.52381,0],[-3.028571,5.485714,0]]],[1,false,-3.752381,-3.752381,2.933333,0,[[-3.752381,2.933333,0],[-4.171429,2.285714,0],[-3.52381,3.390476,0],[-3.752381,2.933333,0]]],[1,false,-6.114286,-6.114286,3.12381,0,[[-6.114286,3.12381,0],[-6.152381,2.704762,0],[-6.114286,3.12381,0]]],[1,false,-0.209524,-0.209524,1.790476,0,[[-0.209524,1.790476,0],[-0.628571,0.8,0],[-0.171429,1.142857,0],[-0.742857,0.571429,0],[-0.209524,0.87619,0],[0.247619,1.409524,0],[-0.285714,1.180952,0],[-0.209524,1.790476,0]]],[1,false,1.695238,1.695238,1.028571,0,[[1.695238,1.028571,0],[2.380952,0.647619,0],[3.219048,0.380952,0],[5.961905,0.114286,0],[7.638095,-0.342857,0],[6.8,0.228571,0],[5.847619,0.533333,0],[3.028571,0.685714,0],[1.695238,1.028571,0]]],[1,false,-9.2,-9.2,-1.219048,0,[[-9.2,-1.219048,0],[-9.542857,-2.285714,0],[-9.466667,-3.542857,0],[-8.971429,-4.342857,0],[-8.133333,-4.87619,0],[-8.819048,-4.266667,0],[-9.238095,-3.466667,0],[-9.352381,-1.942857,0],[-9.2,-1.219048,0]]],[1,false,-6.152381,-6.152381,-1.371429,0,[[-6.152381,-1.371429,0],[-6.380952,-2.209524,0],[-6.8,-2.285714,0],[-7.142857,-2.819048,0],[-6.87619,-3.466667,0],[-5.809524,-3.504762,0],[-4.171429,-3.314286,0],[-6.685714,-3.695238,0],[-6.266667,-4.190476,0],[-5.771429,-4.419048,0],[-4.171429,-3.238095,0],[-3.066667,-3.161905,0],[-3.485714,-2.895238,0],[-4.590476,-2.857143,0],[-3.752381,-2.780952,0],[-2.533333,-3.314286,0],[-1.12381,-4.685714,0],[-0.32381,-5.104762,0],[-0.857143,-4.761905,0],[-2.038095,-3.390476,0],[-2.8,-2.742857,0],[-3.980952,-2.095238,0],[-5.542857,-1.67619,0],[-6.152381,-1.371429,0]]],[1,false,-3.219048,-3.219048,-1.866667,0,[[-3.219048,-1.866667,0],[-3.219048,-2.4,0],[-1.885714,-3.504762,0],[-3.219048,-2.32381,0],[-2.342857,-2.780952,0],[-2.609524,-2.32381,0],[-3.219048,-1.866667,0]]],[1,false,-6.609524,-6.609524,-2.32381,0,[[-6.609524,-2.32381,0],[-6.228571,-2.514286,0],[-5.27619,-2.438095,0],[-4.4,-2.628571,0],[-6.114286,-2.590476,0],[-6.609524,-2.32381,0]]],[1,false,-6,-6,-4.761905,0,[[-6,-4.761905,0],[-6.838095,-4.685714,0],[-7.333333,-4.304762,0],[-7.295238,-4.990476,0],[-6.990476,-5.447619,0],[-6,-4.761905,0]]],[1,false,-4.32381,-4.32381,-3.733333,0,[[-4.32381,-3.733333,0],[-4.780952,-4.609524,0],[-5.009524,-5.6,0],[-4.819048,-4.533333,0],[-4.32381,-3.733333,0]]],[1,false,6.571429,6.571429,-1.447619,0,[[6.571429,-1.447619,0],[7.447619,-1.942857,0],[7.942857,-2.552381,0],[8.780952,-3.27619,0],[8.819048,-2.171429,0],[8.514286,-1.790476,0],[6.571429,-1.447619,0]]],[1,false,8.780952,8.780952,-1.904762,0,[[8.780952,-1.904762,0],[9.009524,-2.438095,0],[9.009524,-3.009524,0],[9.12381,-2.171429,0],[8.780952,-1.904762,0]]],[1,false,6.457143,6.457143,-1.561905,0,[[6.457143,-1.561905,0],[5.695238,-1.485714,0],[6.07619,-1.752381,0],[7.066667,-2.057143,0],[7.790476,-2.47619,0],[7.219048,-1.904762,0],[6.457143,-1.561905,0]]],[1,false,8.32381,8.32381,-4.266667,0,[[8.32381,-4.266667,0],[7.52381,-3.542857,0],[6.8,-3.12381,0],[7.52381,-3.466667,0],[8.32381,-4.266667,0]]],[1,false,6.72381,6.72381,-3.657143,0,[[6.72381,-3.657143,0],[5.771429,-3.504762,0],[6.838095,-4.342857,0],[7.104762,-4.87619,0],[7.180952,-5.561905,0],[7.219048,-4.72381,0],[6.72381,-3.657143,0]]],[1,false,-0.72381,0.114286,4.666667,0,[[-0.72381,4.666667,0],[-0.266667,4.133333,0],[0,3.561905,0],[0.114286,2.457143,0]]],[1,false,-3.504762,-2.819048,1.92381,0,[[-3.504762,1.92381,0],[-2.819048,2.07619,0]]],[1,false,-3.504762,-3.619048,1.809524,0,[[-3.504762,1.809524,0],[-3.619048,1.27619,0]]],[1,false,-3.885714,-3.885714,1.885714,0,[[-3.885714,1.885714,0],[-3.885714,1.466667,0]]],[1,false,-3.352381,-3.390476,1.619048,0,[[-3.352381,1.619048,0],[-3.390476,1.2,0]]],[1,false,-4.685714,-4.266667,-0.247619,0,[[-4.685714,-0.247619,0],[-4.266667,-0.819048,0]]],[1,false,4.304762,4.990476,-3.638095,0,[[4.304762,-3.638095,0],[4.8,-4.47619,0],[4.990476,-5.27619,0]]],[1,false,4.990476,4.87619,-5.27619,0,[[4.990476,-5.27619,0],[4.87619,-6.647619,0]]],[1,false,-3.352381,-4.342857,-4.285714,0,[[-3.352381,-4.285714,0],[-3.542857,-5.085714,0],[-4.342857,-6.571429,0]]],[1,false,-5.257143,-4.8,-5.580952,0,[[-5.257143,-5.580952,0],[-4.8,-6.304762,0]]],[1,false,-4.8,-4.761905,-6.304762,0,[[-4.8,-6.304762,0],[-4.761905,-5.695238,0]]],[1,false,5.104762,5.028571,-5.542857,0,[[5.104762,-5.542857,0],[5.028571,-6.609524,0]]]],"g":[]}]==]
+local packed = HttpService:JSONDecode(planJson)
+assert(packed.v==1,"Unsupported packed plan version")
+local spec={source=packed.s,width=packed.w,height=packed.h,palette={},art={},feeds={},bridges={},banks={}}
+for _,p in ipairs(packed.p) do
+  table.insert(spec.palette,{id=p[1],onBrick=p[2],offBrick=p[3],thickness=p[4]})
+end
+for _,b in ipairs(packed.b) do
+  table.insert(spec.banks,{name=b[1],initialOn=b[2],x=b[3],y=b[4],z=b[5]})
+end
+for _,a in ipairs(packed.a) do
+  local profile=spec.palette[a[1]]
+  local bank=a[6]>0 and spec.banks[a[6]] or nil
+  assert(profile and (a[6]==0 or bank),"Packed plan references a missing wire color or switch bank")
+  local art={id=profile.id,on=a[2],x0=a[3],x1=a[4],y=a[5],bank=bank and bank.name or "Unpowered",path=a[7]}
+  table.insert(spec.art,art)
+end
+local feedIndexes={}
+if packed.f==true then for i=1,#spec.art do table.insert(feedIndexes,i) end
+elseif type(packed.f)=="table" then feedIndexes=packed.f end
+for _,index in ipairs(feedIndexes) do
+  local art=spec.art[index]
+  local bank=nil
+  for _,candidate in ipairs(spec.banks) do if candidate.name==art.bank then bank=candidate;break end end
+  assert(bank,"Feed references a missing switch bank")
+  table.insert(spec.feeds,{bank=art.bank,from={art.x0,art.y,0},via={art.x0,art.y,bank.z},to={bank.x,art.y,bank.z}})
+end
+for _,bridge in ipairs(packed.g or {}) do
+  local points={}
+  if type(bridge[1])=="number" then
+    points={{bridge[1],bridge[3],0},{bridge[2],bridge[3],0}}
+  else
+    points=bridge
+  end
+  table.insert(spec.bridges,{from=points[1],to=points[#points],points=points})
+end
+local storage = game:GetService("ReplicatedStorage")
+local infoRoot = storage:WaitForChild("ClientItemInfo")
+local placeRoot = storage:WaitForChild("PlaceStructure")
+local placedWire = placeRoot:WaitForChild("ClientPlacedWire")
+local placedStructure = placeRoot:WaitForChild("ClientPlacedStructure")
+local CanPlace = require(storage.Interaction.CanPlace)
+local mouse = player:GetMouse()
+local placementStore = (type(shared)=="table" and shared) or _G
+local teamInstance=HttpService:GenerateGUID(false)
+local teamPeerUserId=nil
+local teamRequest=nil
+local function teamPost(action,extra)
+  assert(teamRequest,"Your executor must provide request/http_request for the local relay")
+  local body={action=action,session=TEAM_SESSION,secret=TEAM_SECRET,role=TEAM_ROLE,userId=player.UserId,instance=teamInstance}
+  for key,value in pairs(extra or {}) do body[key]=value end
+  local ok,response=pcall(teamRequest,{Url=TEAM_RELAY_URL,Method="POST",Headers={["Content-Type"]="application/json"},Body=HttpService:JSONEncode(body)})
+  assert(ok and response,"Local relay request failed. Start 'Start Wire Atelier Relay.cmd': "..tostring(response))
+  local decoded=HttpService:JSONDecode(response.Body or response.body or "{}")
+  assert(decoded.ok,"Local relay: "..tostring(decoded.error or "unknown error"))
+  return decoded
+end
+if TEAM_ROLE~="solo" then
+  teamRequest=request or http_request or (syn and syn.request) or (http and http.request)
+  assert(teamRequest,"The executor needs localhost HTTP request support")
+  assert(game.JobId~="","Account pairing needs a live Roblox server")
+  teamPeerUserId=tonumber(TEAM_PEER)
+  if not teamPeerUserId then
+    local ok,uid=pcall(function() return Players:GetUserIdFromNameAsync(TEAM_PEER) end)
+    assert(ok and uid,"Could not resolve peer username. Enter its numeric UserId instead.")
+    teamPeerUserId=uid
+  end
+  assert(teamPeerUserId~=player.UserId,"Leader and worker must be different accounts")
+  assert(Players:GetPlayerByUserId(teamPeerUserId),"The paired account is not in this LT2 server")
+  teamPost("register",{peerUserId=teamPeerUserId,server=game.JobId,place=game.PlaceId,planHash=TEAM_PLAN_HASH})
+  status("Paired as "..TEAM_ROLE.." with UserId "..teamPeerUserId)
+end
+local saved = COMMIT and placementStore.WireAtelierPlacement or nil
+if TEAM_ROLE=="worker" then
+  local remotePlan=nil
+  for attempt=1,180 do
+    local reply=teamPost("planGet")
+    if reply.plan and not reply.stopped then remotePlan=reply.plan;break end
+    if attempt%15==0 then status("Waiting for the plot owner to lock the artwork...") end
+    task.wait(1)
+  end
+  assert(remotePlan and remotePlan.leader==teamPeerUserId,"No matching leader placement arrived")
+  saved={planJson=planJson,hit=Vector3.new(unpack(remotePlan.hit)),horizontal=Vector3.new(unpack(remotePlan.horizontal))}
+end
+local hit, horizontal
+local reuseSaved=saved and saved.planJson == planJson
+if reuseSaved then
+  hit, horizontal = saved.hit, saved.horizontal
+  print("Wire Atelier using the exact spot selected in the preview:", tostring(hit))
+else
+  if POSITION_MODE == "click" then
+    status("Click the ground where the artwork's bottom center should stand.")
+    mouse.Button1Down:Wait()
+  end
+  assert(mouse.Target, "Choose a point on your plot before running this script.")
+  hit = mouse.Hit.Position
+  local look = workspace.CurrentCamera.CFrame.LookVector
+  horizontal = Vector3.new(look.X,0,look.Z)
+  assert(horizontal.Magnitude > 0.01, "Look toward the plot at a slight angle.")
+  horizontal = CFrame.Angles(0,math.rad(ROTATE_DEGREES),0):VectorToWorldSpace(horizontal.Unit)
+end
+local function movePlacement(reason)
+  placementStore.WireAtelierPlacement=nil
+  local picker=Instance.new("Model")
+  picker.Name="WireAtelierMover"
+  picker.WorldPivot=CFrame.new()
+  local function pickerLine(a,b,color,width)
+    local length=(b-a).Magnitude
+    local part=Instance.new("Part")
+    part.Name="PreviewWire";part.Shape=Enum.PartType.Cylinder;part.Anchored=true
+    part.CanCollide=false;part.CanTouch=false;part.CanQuery=false
+    part.Material=Enum.Material.Neon;part.Transparency=.27;part.Color=color
+    part.Size=Vector3.new(length,width,width)
+    __HuxGhost:BeforeTeleport(part); part.CFrame=CFrame.lookAt(a,b)*CFrame.new(0,0,-length/2)*CFrame.Angles(0,math.pi/2,0)
+    part.Parent=picker
+  end
+  local edgeColor=Color3.fromRGB(200,251,98)
+  local x0,x1=-spec.width/2,spec.width/2
+  local y0,y1=-spec.height/2,spec.height/2
+  pickerLine(Vector3.new(x0,y0,0),Vector3.new(x1,y0,0),edgeColor,.14)
+  pickerLine(Vector3.new(x0,y1,0),Vector3.new(x1,y1,0),edgeColor,.14)
+  pickerLine(Vector3.new(x0,y0,0),Vector3.new(x0,y1,0),edgeColor,.14)
+  pickerLine(Vector3.new(x1,y0,0),Vector3.new(x1,y1,0),edgeColor,.14)
+  local profileById={}
+  for _,p in ipairs(spec.palette) do profileById[p.id]=p end
+  local stride=math.max(1,math.ceil(#spec.art/400))
+  for i,a in ipairs(spec.art) do
+    if (i-1)%stride==0 then
+      local p=profileById[a.id]
+      local color=BrickColor.new(a.on and p.onBrick or p.offBrick).Color
+      local path=a.path or {{a.x0,a.y,0},{a.x1,a.y,0}}
+      for j=2,#path do
+        local left,right=path[j-1],path[j]
+        pickerLine(Vector3.new(left[1],left[2],left[3]),Vector3.new(right[1],right[2],right[3]),color,math.max(p.thickness,.15))
+      end
+    end
+  end
+  for _,bridge in ipairs(spec.bridges) do
+    for i=2,#bridge.points do
+      local a,b=bridge.points[i-1],bridge.points[i]
+      pickerLine(Vector3.new(a[1],a[2],a[3]),Vector3.new(b[1],b[2],b[3]),Color3.fromRGB(177,222,195),.18)
+    end
+  end
+  for _,bank in ipairs(spec.banks) do
+    local a=Vector3.new(bank.x,spec.height/2,bank.z)
+    local b=Vector3.new(bank.x,bank.y,bank.z)
+    pickerLine(a,b,Color3.fromRGB(103,181,186),.08)
+    pickerLine(b,Vector3.new(bank.x,bank.y,0),Color3.fromRGB(103,181,186),.08)
+  end
+  picker.Parent=workspace.CurrentCamera
+  statusFrame.Size=UDim2.fromOffset(360,152)
+  local controls=Instance.new("Frame")
+  controls.Position=UDim2.fromOffset(16,98);controls.Size=UDim2.new(1,-32,0,42)
+  controls.BackgroundTransparency=1;controls.Parent=statusFrame
+  local finished,cancelled=false,false
+  local function updatePicker()
+    local center=hit+Vector3.new(0,spec.height/2+ART_LIFT,0)
+    local previewFrame=CFrame.lookAt(center,center+horizontal.Unit)
+    picker:PivotTo(previewFrame)
+    detail.Text=string.format("X %.1f  Y %.1f  Z %.1f | Click to move, WASD nudge, Q/E rotate, PgUp/PgDn height, Enter lock",hit.X,hit.Y,hit.Z)
+  end
+  local function move(side,depth,height)
+    local right=CFrame.lookAt(Vector3.zero,horizontal.Unit).RightVector
+    hit=hit+right*side+horizontal.Unit*depth+Vector3.new(0,height,0)
+    updatePicker()
+  end
+  local function rotate(degrees)
+    horizontal=CFrame.Angles(0,math.rad(degrees),0):VectorToWorldSpace(horizontal.Unit)
+    updatePicker()
+  end
+  local function button(label,x,width,action)
+    local b=Instance.new("TextButton")
+    b.Text=label;b.Position=UDim2.fromOffset(x,0);b.Size=UDim2.fromOffset(width,38)
+    b.Font=Enum.Font.GothamBold;b.TextSize=12;b.TextColor3=Color3.fromRGB(230,247,222)
+    b.BackgroundColor3=Color3.fromRGB(45,68,65);b.BorderSizePixel=0;b.Parent=controls
+    b.MouseButton1Click:Connect(action)
+  end
+  button("LEFT",0,52,function() move(-.5,0,0) end)
+  button("RIGHT",56,52,function() move(.5,0,0) end)
+  button("Q ↶",112,48,function() rotate(-15) end)
+  button("E ↷",164,48,function() rotate(15) end)
+  button("LOCK",216,112,function() finished=true end)
+  local UserInputService=game:GetService("UserInputService")
+  local keyConnection=UserInputService.InputBegan:Connect(function(input,processed)
+    if processed then return end
+    if input.UserInputType==Enum.UserInputType.MouseButton1 and mouse.Target then
+      hit=mouse.Hit.Position;updatePicker();return
+    end
+    local step=UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and 5 or .5
+    local key=input.KeyCode
+    if key==Enum.KeyCode.A or key==Enum.KeyCode.Left then move(-step,0,0)
+    elseif key==Enum.KeyCode.D or key==Enum.KeyCode.Right then move(step,0,0)
+    elseif key==Enum.KeyCode.W or key==Enum.KeyCode.Up then move(0,step,0)
+    elseif key==Enum.KeyCode.S or key==Enum.KeyCode.Down then move(0,-step,0)
+    elseif key==Enum.KeyCode.PageUp then move(0,0,step)
+    elseif key==Enum.KeyCode.PageDown then move(0,0,-step)
+    elseif key==Enum.KeyCode.Q then rotate(-15)
+    elseif key==Enum.KeyCode.E then rotate(15)
+    elseif key==Enum.KeyCode.Return or key==Enum.KeyCode.KeypadEnter then finished=true
+    elseif key==Enum.KeyCode.Escape then cancelled=true;finished=true end
+  end)
+  updatePicker()
+  if reason then status("That position leaves your plot: "..reason..". Move the preview and LOCK again.") end
+  repeat task.wait(.05) until finished
+  keyConnection:Disconnect()
+  controls:Destroy()
+  picker:Destroy()
+  statusFrame.Size=UDim2.fromOffset(360,96)
+  assert(not cancelled,"Placement cancelled")
+  status("Placement locked at "..tostring(hit)..". Checking the plan...")
+end
+if not reuseSaved then movePlacement() end
+local center,frame
+local function V(q) return frame:PointToWorldSpace(Vector3.new(q[1],q[2],q[3])) end
+local function Q(x,y,z) return {x,y,z} end
+local jobs, switches, need = {}, {}, {}
+local function addPath(id,raw,kind,on)
+  local points={}
+  for _,p in ipairs(raw) do
+    if #points==0 or (p-points[#points]).Magnitude>.0001 then
+      while #points>=2 do
+        local a,b=points[#points-1],points[#points]
+        local u,v=(b-a).Unit,(p-b).Unit
+        if u:Cross(v).Magnitude<.0001 and u:Dot(v)>.9999 then table.remove(points) else break end
+      end
+      table.insert(points,p)
+    end
+  end
+  assert(#points>=2,"Wire needs at least two distinct points")
+  local total=0
+  for i=2,#points do
+    local section=(points[i]-points[i-1]).Magnitude
+    assert(section>=.41-0.0001,"A wire section is below 0.41 studs: "..kind)
+    total=total+section
+  end
+  local maxLength=MAX_WIRE_LENGTH
+  assert(total<=maxLength+0.0001,"A wire exceeds the 60-stud total length cap: "..kind)
+  table.insert(jobs,{id=id,points=points,kind=kind,on=on})
+  need[id]=(need[id] or 0)+1
+end
+local function addWire(id,a,b,kind,on) addPath(id,{a,b},kind,on) end
+local function addChopped(id,a,b,kind)
+  local length=(b-a).Magnitude
+  if length<.0001 then return end
+  local maxLength=MAX_WIRE_LENGTH
+  local count=math.ceil(length/(maxLength))
+  assert(length/count>=.41-0.0001,"A rear section is below 0.41 studs")
+  for n=1,count do addWire(id,a:Lerp(b,(n-1)/count),a:Lerp(b,n/count),kind) end
+end
+local permissions={"PlaceStructure","MoveStructure","Destroy"}
+local permissionModule=require(storage.Interaction.InteractionPermission)
+local function collectRenamedLand()
+  local bounds={}
+  local function inspect(property)
+    if not (property:IsA("Model") or property:IsA("Folder")) then return end
+    local plotOwner=nil
+    local tiles={}
+    local placedItem=false
+    for _,child in ipairs(property:GetChildren()) do
+      if child:IsA("ObjectValue") and child.Value and child.Value:IsA("Player") then
+        plotOwner=child.Value
+      elseif child:IsA("BasePart") and child.Size.X>=4.9 and child.Size.Z>=4.9 and child.Size.Y<=5 then
+        table.insert(tiles,child)
+      elseif child:IsA("StringValue") and infoRoot:FindFirstChild(child.Value) then
+        placedItem=true
+      end
+    end
+    if not plotOwner or #tiles==0 or placedItem then return end
+    local allowed=plotOwner==player
+    if not allowed then
+      local ok,result=pcall(function()
+        return permissionModule:IsInteractionTypePermitted(player,plotOwner,permissions)
+      end)
+      allowed=ok and result==true
+    end
+    if not allowed then return end
+    for _,tile in ipairs(tiles) do
+      local half=tile.Size/2
+      table.insert(bounds,{
+        minBounds=Vector3.new(tile.Position.X-half.X,tile.Position.Y,tile.Position.Z-half.Z),
+        maxBounds=Vector3.new(tile.Position.X+half.X,tile.Position.Y+100,tile.Position.Z+half.Z),
+        owner=plotOwner
+      })
+    end
+  end
+  for _,container in ipairs(workspace:GetChildren()) do
+    inspect(container)
+    for _,candidate in ipairs(container:GetChildren()) do inspect(candidate) end
+  end
+  return bounds
+end
+local land=collectRenamedLand()
+if #land==0 then
+  local ok,result=pcall(function() return CanPlace:GetPlayerLand(player,permissions) end)
+  if ok and result then land=result end
+end
+assert(#land>0,"No owned or permitted plot tiles were found. Check plot ownership or whitelist permissions.")
+print("Wire Atelier found",#land,"owned or permitted plot tiles by owner value and tile geometry")
+local owner=nil
+while true do
+jobs,switches,need={},{},{}
+center=hit+Vector3.new(0,spec.height/2+ART_LIFT,0)
+frame=CFrame.lookAt(center,center+horizontal.Unit)
+for _,a in ipairs(spec.art) do
+  local raw={}
+  for _,point in ipairs(a.path or {Q(a.x0,a.y,0),Q(a.x1,a.y,0)}) do table.insert(raw,V(point)) end
+  addPath(a.id,raw,"art",a.on)
+end
+for _,bridge in ipairs(spec.bridges) do
+  local points={}
+  for _,point in ipairs(bridge.points) do table.insert(points,V(point)) end
+  addPath("Wire",points,"row bridge")
+end
+for _,f in ipairs(spec.feeds) do
+  local start,bend,finish=V(f.from),V(f.via),V(f.to)
+  local total=(bend-start).Magnitude+(finish-bend).Magnitude
+  if total<=MAX_WIRE_LENGTH then
+    addPath("Wire",{start,bend,finish},"rear feed")
+  else
+    addWire("Wire",start,bend,"rear lead")
+    addChopped("Wire",bend,finish,"rear feed")
+  end
+end
+for _,b in ipairs(spec.banks) do
+  local rows,seen={},{}
+  for _,feed in ipairs(spec.feeds) do
+    if feed.bank==b.name then
+      local y=feed.to[2]
+      if not seen[y] then seen[y]=true;table.insert(rows,y) end
+    end
+  end
+  table.sort(rows,function(a,c) return a>c end)
+  for i=2,#rows do
+    addChopped("Wire",V(Q(b.x,rows[i-1],b.z)),V(Q(b.x,rows[i],b.z)),"bus junction")
+  end
+  if #rows>0 then
+    addChopped("Wire",V(Q(b.x,rows[#rows],b.z)),V(Q(b.x,b.y,b.z)),"switch lead")
+  end
+  table.insert(switches,{bank=b,position=V(Q(b.x,b.y,b.z))})
+  need.Lever0=(need.Lever0 or 0)+1
+end
+assert(#jobs+#switches<=MAX_BOXES_PER_RUN,"Build exceeds the per-run box safety limit")
+status("Checking "..(#jobs+#switches).." placements against your plot...")
+owner=nil
+local badPoint=nil
+local function checkPoint(p)
+  local ok,found=CanPlace:CanPlace(player,p,{Land=land,PermissionType=permissions})
+  if not ok then
+    local overTile=false
+    for _,tile in ipairs(land) do
+      if p.X>=tile.minBounds.X and p.X<=tile.maxBounds.X and p.Z>=tile.minBounds.Z and p.Z<=tile.maxBounds.Z then
+        overTile=true;break
+      end
+    end
+    badPoint=(overTile and "wire or switch below the plot floor at " or "wire or switch outside the plot tiles at ")..tostring(p)
+    return false
+  end
+  if owner and owner~=found then badPoint="layout crosses two plot owners";return false end
+  owner=found
+  return true
+end
+for _,job in ipairs(jobs) do
+  for _,p in ipairs(job.points) do if not checkPoint(p) then break end end
+  if badPoint then break end
+end
+if not badPoint then
+  for _,sw in ipairs(switches) do if not checkPoint(sw.position) then break end end
+end
+if not badPoint then break end
+if TEAM_ROLE=="worker" then error("Worker cannot place on the leader's plot: "..badPoint..". Grant build permission on the owner's plot.") end
+placementStore.WireAtelierPlacement=nil
+movePlacement(badPoint)
+end
+placementStore.WireAtelierPlacement={planJson=planJson,hit=hit,horizontal=horizontal}
+if TEAM_ROLE=="leader" then
+  assert(owner==player,"Team build must be locked on the leader's own plot")
+  local published=false
+  for attempt=1,120 do
+    local ok=pcall(teamPost,"planSet",{hit={hit.X,hit.Y,hit.Z},horizontal={horizontal.X,horizontal.Y,horizontal.Z}})
+    if ok then published=true;break end
+    if attempt%10==0 then status("Waiting for the helper to start its worker script...") end
+    task.wait(1)
+  end
+  assert(published,"Helper did not pair within two minutes. Start its worker script first.")
+end
+if TEAM_ROLE=="worker" then assert(owner and owner.UserId==teamPeerUserId,"Worker plan is not on the paired leader's plot") end
+local function boxOwner(model)
+  local named=model:FindFirstChild("Owner")
+  if named and named:IsA("ObjectValue") then return named end
+  for _,child in ipairs(model:GetChildren()) do
+    if child:IsA("ObjectValue") and (child.Value==nil or child.Value:IsA("Player")) then return child end
+  end
+end
+local function boxItem(model,purchased)
+  local named=model:FindFirstChild(purchased and "PurchasedBoxItemName" or "BoxItemName")
+  if named and named:IsA("StringValue") then return named end
+  local part=model.PrimaryPart
+  if not part then return nil end
+  if purchased and math.max(part.Size.X,part.Size.Y,part.Size.Z)<1 then return nil end
+  local match=nil
+  for _,child in ipairs(model:GetChildren()) do
+    if child:IsA("StringValue") and infoRoot:FindFirstChild(child.Value) then
+      if not match or (match.Value=="Wire" and child.Value~="Wire") then match=child end
+    end
+  end
+  return match
+end
+local boxes,knownOwned={},{}
+local shopAvailable,shopStockCounts,shopStockModels,shopContainers={},{},{},{}
+status("Indexing owned boxes and shop stock...")
+for index,instance in ipairs(workspace:GetDescendants()) do
+  if instance:IsA("Model") then
+    local own=boxOwner(instance)
+    if own and own:IsA("ObjectValue") then
+      if own.Value==player then
+        local item=boxItem(instance,true)
+        if item and item:IsA("StringValue") then
+          knownOwned[instance]=true
+          local part=instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart",true)
+          if part then
+            local valid,found=CanPlace:CanPlace(player,part.Position,{Land=land,PermissionType=permissions})
+            if valid and found==owner then
+              boxes[item.Value]=boxes[item.Value] or {}
+              table.insert(boxes[item.Value],instance)
+            end
+          end
+        end
+      elseif AUTO_BUY_MISSING and own.Value==nil and instance.PrimaryPart then
+        local item=boxItem(instance,false)
+        if item then
+          shopAvailable[item.Value]=true
+          shopStockCounts[item.Value]=(shopStockCounts[item.Value] or 0)+1
+          shopStockModels[item.Value]=shopStockModels[item.Value] or {}
+          table.insert(shopStockModels[item.Value],instance)
+          if instance.Parent then shopContainers[instance.Parent]=true end
+        end
+      end
+    end
+  end
+  if index%400==0 then task.wait() end
+end
+local profiles={}
+for _,p in ipairs(spec.palette) do profiles[p.id]=p end
+local reservedOwned,needsFallback={},{}
+for i=1,#spec.art do
+  local id=jobs[i].id
+  local have=boxes[id] and #boxes[id] or 0
+  if shopAvailable[id] or (reservedOwned[id] or 0)<have then
+    if not shopAvailable[id] then reservedOwned[id]=(reservedOwned[id] or 0)+1 end
+  else
+    needsFallback[i]=true
+  end
+end
+local replacements={}
+local function shade(profile,on)
+  if profile.id:sub(1,10)=="IcicleWire" then return BrickColor.new(profile.offBrick).Color end
+  return BrickColor.new(on and profile.onBrick or profile.offBrick).Color
+end
+local function whiteEnough(color)
+  local brightest=math.max(color.R,color.G,color.B)
+  local darkest=math.min(color.R,color.G,color.B)
+  return darkest>=.65 and brightest-darkest<=.16
+end
+local function colorDistance(a,b)
+  local r,g,blue=a.R-b.R,a.G-b.G,a.B-b.B
+  return .95*r*r+1.15*g*g+.9*blue*blue
+end
+local resolvedJobs,resolvedNeed={},{}
+local artJobCount=0
+local function appendResolved(id,points,kind,on)
+  table.insert(resolvedJobs,{id=id,points=points,kind=kind,on=on})
+  resolvedNeed[id]=(resolvedNeed[id] or 0)+1
+  if kind=="art" then artJobCount=artJobCount+1 end
+end
+for i,job in ipairs(jobs) do
+  if TEAM_ROLE~="worker" and i<=#spec.art and needsFallback[i] and FALLBACK_UNAVAILABLE then
+    local target=profiles[job.id]
+    local wanted=shade(target,job.on)
+    local best,bestScore,bestCount=nil,math.huge,nil
+    local a,b=job.points[1],job.points[#job.points]
+    local length=(b-a).Magnitude
+    local returned=#job.points>2
+    local pathLength=0
+    if returned then for section=2,#job.points do pathLength=pathLength+(job.points[section]-job.points[section-1]).Magnitude end end
+    for _,candidate in ipairs(spec.palette) do
+      local have=boxes[candidate.id] and #boxes[candidate.id] or 0
+      local maxLength=MAX_WIRE_LENGTH
+      local sectionLimit=candidate.id:sub(1,10)=="IcicleWire" and math.min(maxLength,.749) or maxLength
+      local count=returned and 1 or math.ceil(length/sectionLimit-1e-6)
+      if (not returned or (pathLength<=sectionLimit+.0001 and candidate.id:sub(1,10)~="IcicleWire"))
+        and (returned or length/count>=.41-.0001) and (candidate.id:sub(1,10)~="IcicleWire" or whiteEnough(wanted))
+        and (shopAvailable[candidate.id] or have-(reservedOwned[candidate.id] or 0)>=count) then
+        local score=colorDistance(wanted,shade(candidate,job.on))
+        if score<bestScore then best,bestScore,bestCount=candidate,score,count end
+      end
+    end
+    assert(best,"No owned or shop-stocked wire color can replace "..job.id..". Disable unavailable colors or supply more boxes.")
+    if not shopAvailable[best.id] then reservedOwned[best.id]=(reservedOwned[best.id] or 0)+bestCount end
+    local key=job.id.." -> "..best.id
+    replacements[key]=(replacements[key] or 0)+1
+    if returned then appendResolved(best.id,job.points,"art",job.on)
+    else for section=1,bestCount do
+      appendResolved(best.id,{a:Lerp(b,(section-1)/bestCount),a:Lerp(b,section/bestCount)},"art",job.on)
+    end end
+  else
+    appendResolved(job.id,job.points,job.kind,job.on)
+  end
+end
+jobs,need=resolvedJobs,resolvedNeed
+need.Lever0=#switches
+assert(#jobs+#switches<=MAX_BOXES_PER_RUN,"Substitutions exceed the per-run box safety limit")
+local replacementList={}
+for key,count in pairs(replacements) do table.insert(replacementList,key.." ("..count..")") end
+table.sort(replacementList)
+local short={}
+local missing={}
+local estimatedCost=0
+for id,count in pairs(need) do
+  local have=boxes[id] and #boxes[id] or 0
+  if have<count then
+    local qty=count-have
+    missing[id]=qty
+    estimatedCost=estimatedCost+qty*infoRoot[id].Price.Value
+    table.insert(short,id.." "..have.."/"..count)
+  end
+end
+table.sort(short)
+local old=placementStore.WireAtelierPreviewModel or workspace.CurrentCamera:FindFirstChild(PREVIEW_NAME)
+if old then old:Destroy() end
+placementStore.WireAtelierPreviewModel=nil
+local rayParams=RaycastParams.new()
+rayParams.FilterType=Enum.RaycastFilterType.Exclude
+rayParams.FilterDescendantsInstances=player.Character and {player.Character} or {}
+local obstructions={}
+for i,job in ipairs(jobs) do
+  for section=2,#job.points do
+    local a,b=job.points[section-1],job.points[section]
+    local delta=b-a
+    local unit=delta.Unit
+    local hitPart=workspace:Raycast(a+unit*.12,delta-unit*.24,rayParams)
+    if hitPart then table.insert(obstructions,i.." "..job.kind.." hits "..hitPart.Instance:GetFullName()) end
+  end
+end
+local preview=Instance.new("Model")
+preview.Name=PREVIEW_NAME
+local colorById={}
+for _,p in ipairs(spec.palette) do colorById[p.id]=p end
+local function ghost(a,b,color,width)
+  local len=(b-a).Magnitude
+  local p=Instance.new("Part")
+  p.Shape=Enum.PartType.Cylinder;p.Anchored=true;p.CanCollide=false;p.CanTouch=false;p.CanQuery=false
+  p.Material=Enum.Material.Neon;p.Transparency=.38;p.Color=color;p.Size=Vector3.new(len,width,width)
+  __HuxGhost:BeforeTeleport(p); p.CFrame=CFrame.lookAt(a,b)*CFrame.new(0,0,-len/2)*CFrame.Angles(0,math.pi/2,0)
+  p.Parent=preview
+end
+if not COMMIT then
+  local previewStride=math.max(1,math.ceil(#jobs/1200))
+  for i,job in ipairs(jobs) do
+    if (i-1)%previewStride==0 then
+      local profile=colorById[job.id]
+      local c=profile and BrickColor.new(job.on and profile.onBrick or profile.offBrick).Color or Color3.fromRGB(86,125,133)
+      for section=2,#job.points do ghost(job.points[section-1],job.points[section],c,profile and profile.thickness or .18) end
+    end
+  end
+  for _,sw in ipairs(switches) do
+    local p=Instance.new("Part");p.Name=sw.bank.name;p.Anchored=true;p.CanCollide=false;p.CanTouch=false;p.CanQuery=false
+    p.Material=Enum.Material.Neon;p.Color=Color3.fromRGB(194,244,99);p.Size=Vector3.new(.55,.55,.55);p.Position=sw.position;p.Parent=preview
+  end
+  preview.Parent=workspace.CurrentCamera
+  placementStore.WireAtelierPreviewModel=preview
+  print("Wire Atelier preview:",artJobCount,"art wires,",#jobs-artJobCount,"rear wire sections,",#switches,"levers.")
+  print("Available-color substitutions:",#replacementList==0 and "none" or table.concat(replacementList,", "))
+  local stockSummary={}
+  for id in pairs(need) do
+    if id~="Lever0" then table.insert(stockSummary,id.."="..(shopStockCounts[id] or 0)) end
+  end
+  table.sort(stockSummary)
+  print("Visible shop boxes now:",table.concat(stockSummary,", "))
+  print("Origin:",tostring(center)," Missing boxes on this plot:",#short==0 and "none" or table.concat(short,", "))
+  print("Placement interval:",MIN_PLACEMENT_INTERVAL,"seconds per wire or switch")
+  print("Estimated automatic purchase cost:",estimatedCost," Current cash:",player.leaderstats.Money.Value)
+  print("Existing path obstructions:",#obstructions,#obstructions>0 and table.concat(obstructions,"; ",1,math.min(5,#obstructions)) or "none")
+  print("To place at this exact spot, set COMMIT=true and run this same export again. AUTO_BUY_MISSING can be disabled.")
+  status("Preview locked: "..#jobs.." wires, "..#switches.." switches, "..#replacementList.." color substitutions"..(previewStride>1 and " (sampled view)" or "")..". Copy Build + Buy to place.")
+  return
+end
+preview:Destroy()
+placementStore.WireAtelierPreviewModel=nil
+  if #obstructions>0 then warn("Wire Atelier found existing path overlaps; confirmed wires will be skipped during resume.") end
+local buyMissing,purchaseHalted=nil,nil
+-- Shared by checkout and placement so a ready wire need not detour to the base.
+local nextPlacementAt=0
+if #short>0 and TEAM_ROLE=="solo" then
+  assert(AUTO_BUY_MISSING,"Missing owned boxes on the target plot: "..table.concat(short,", "))
+end
+if AUTO_BUY_MISSING then
+  local dragging=storage.Interaction:WaitForChild("ClientIsDragging")
+  local requestOwnership=storage.Interaction:FindFirstChild("ClientRequestOwnership")
+  local chatting=storage.NPCDialog:WaitForChild("PlayerChatted")
+  local chattingValue=storage.NPCDialog:WaitForChild("SetChattingValue")
+  local promptChat=storage.NPCDialog:WaitForChild("PromptChat")
+  local character=player.Character
+  local humanoid=character and character:FindFirstChildWhichIsA("Humanoid")
+  local rootPart=character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart or (humanoid and humanoid.RootPart))
+  assert(rootPart,"Character root is needed for automatic checkout")
+  local seen=knownOwned
+  local function stockBox(id)
+    for _,box in ipairs(shopStockModels[id] or {}) do
+      local own=box.Parent and boxOwner(box)
+      if own and own.Value==nil and box.PrimaryPart and shopContainers[box.Parent] then return box end
+    end
+    for container in pairs(shopContainers) do
+      if container.Parent then
+        for _,box in ipairs(container:GetChildren()) do
+          if box:IsA("Model") and box.PrimaryPart then
+            local own=boxOwner(box)
+            local item=boxItem(box,false)
+            if own and own.Value==nil and item and item.Value==id then
+              shopStockModels[id]=shopStockModels[id] or {}
+              table.insert(shopStockModels[id],box)
+              return box
+            end
+          end
+        end
+      end
+    end
+  end
+  local cashierCache={}
+  local function cashierProfiles(scope)
+    if cashierCache[scope] then
+      local valid={}
+      for _,profile in ipairs(cashierCache[scope])do
+        if profile.npc.Parent and profile.counter.Parent and profile.head.Parent then table.insert(valid,profile)end
+      end
+      if #valid>0 then return valid end
+      cashierCache[scope]=nil
+    end
+    local profiles={}
+    for index,npc in ipairs(scope:GetDescendants()) do
+      if index%400==0 then task.wait();assert(not stopped,"Stopped during cashier lookup")end
+      if npc:IsA("Model") and npc:FindFirstChildWhichIsA("Humanoid")
+        and npc:FindFirstChildWhichIsA("DialogChoice",true) then
+        local shop=npc.Parent
+        local head=npc:FindFirstChild("Head") or npc.PrimaryPart or npc:FindFirstChildWhichIsA("BasePart",true)
+        if head and shop then
+          local counter=shop:FindFirstChild("Counter",true)
+          if counter and not counter:IsA("BasePart")then counter=counter:FindFirstChildWhichIsA("BasePart",true)end
+          if not (counter and counter:IsA("BasePart")) then
+            counter=nil
+            local best=math.huge
+            for _,parts in ipairs({shop:GetChildren(),shop:GetDescendants()}) do
+              for _,part in ipairs(parts) do
+                if part:IsA("BasePart") and not part:IsDescendantOf(npc)
+                  and part.Size.X>=2 and part.Size.Z>=2 and part.Size.X<=20 and part.Size.Z<=20 and part.Size.Y<=6 then
+                  local top=part.Position.Y+part.Size.Y/2
+                  local horizontal=(Vector3.new(part.Position.X,0,part.Position.Z)-Vector3.new(head.Position.X,0,head.Position.Z)).Magnitude
+                  if horizontal<15 and math.abs(top-head.Position.Y)<5 then
+                    local score=horizontal+math.abs(top-head.Position.Y)*.8+math.max(0,part.Size.X*part.Size.Z-60)*.2
+                    if score<best then counter=part;best=score end
+                  end
+                end
+              end
+              if counter then break end
+            end
+          end
+          if counter then table.insert(profiles,{counter=counter,npc=npc,head=head}) end
+        end
+      end
+    end
+    -- Empty results are often caused by streaming; never cache a failed lookup.
+    if #profiles>0 then cashierCache[scope]=profiles end
+    return profiles
+  end
+  local function shopFor(box)
+    local scope=box.Parent and box.Parent.Parent
+    assert(scope,"Could not find the store area for "..boxItem(box,false).Value)
+    if workspace.StreamingEnabled then
+      status("Loading the shop cashier near the stock box...")
+      pcall(function()player:RequestStreamAroundAsync(box.PrimaryPart.Position,2)end)
+    end
+    local winner,best=nil,math.huge
+    for attempt=1,4 do
+      assert(not stopped,"Stopped during cashier lookup")
+      local area=scope
+      while area do
+        if attempt>1 then cashierCache[area]=nil end
+        for _,profile in ipairs(cashierProfiles(area)) do
+          if profile.counter.Parent and profile.npc.Parent then
+            local distance=(profile.counter.Position-box.PrimaryPart.Position).Magnitude
+            if distance<best and distance<300 then winner=profile;best=distance end
+          end
+        end
+        if winner or area==workspace then break end
+        area=area.Parent
+      end
+      if winner then break end
+      status("Waiting for the shop cashier/counter to load ("..attempt.."/4)...")
+      task.wait(.1+attempt*.1)
+    end
+    assert(winner and best<300,"Could not find a cashier and counter near the selected stock box")
+    return winner.counter,winner.npc,winner.head
+  end
+  local function purchasedBox(id,stock,before)
+    local candidates={stock}
+    for _,model in ipairs(workspace.PlayerModels:GetChildren()) do
+      if model~=stock and not before[model] then table.insert(candidates,model) end
+    end
+    for _,model in ipairs(candidates) do
+      if model and model.Parent and model:IsA("Model") and model:IsDescendantOf(workspace.PlayerModels) then
+        local own,item=boxOwner(model),boxItem(model,true)
+        if own and own.Value==player and item and item.Value==id then
+          if not seen[model] then
+            seen[model]=true
+            boxes[id]=boxes[id] or {}
+            table.insert(boxes[id],model)
+          end
+          return model
+        end
+      end
+    end
+  end
+  local function invokeBounded(remote,seconds,...)
+    local args={...}
+    local finished,success,value=false,false,nil
+    task.spawn(function()
+      success,value=pcall(function() return remote:InvokeServer(unpack(args)) end)
+      finished=true
+    end)
+    local deadline=os.clock()+seconds
+    while not finished and os.clock()<deadline do task.wait(.05) end
+    assert(finished,"Cashier request timed out. Check the box before retrying.")
+    if not success then error(value) end
+    return value
+  end
+  local function hasBoxControl(box)
+    local own=box.Parent and boxOwner(box)
+    if not own or own.Value~=player then return false end
+    if type(isnetworkowner)~="function" then return nil end
+    local checked={}
+    for _,part in ipairs(box:GetDescendants()) do
+      if part:IsA("BasePart") and not part.Anchored then
+        local root=part.AssemblyRootPart or part
+        if not checked[root] then
+          checked[root]=true
+          local ok,controlled=pcall(isnetworkowner,root)
+          if not ok or not controlled then return false end
+        end
+      end
+    end
+    return next(checked)~=nil
+  end
+
+  local function dragToPad(box,counter)
+    local part=box.PrimaryPart
+    assert(part and not part.Anchored,"Shop box cannot be dragged")
+    local bound,size=box:GetBoundingBox()
+    local pivot=box:GetPivot()
+    local desired=counter.CFrame*CFrame.new(0,counter.Size.Y/2+size.Y/2-.08,0)
+    local target=desired*bound:ToObjectSpace(pivot)
+    if CodexItemTP.eligible(box) then
+      local ok,why=CodexItemTP.move(box,target,function() return stopped or not statusGui.Parent or not box.Parent end)
+      assert(ok,why or "Could not move the shop box")
+      return desired
+    end
+    for attempt=1,3 do
+      assert(box.Parent and part.Parent,"Shop box disappeared while moving to checkout")
+      pcall(function() box:PivotTo(target) end)
+      part.AssemblyLinearVelocity=Vector3.zero
+      part.AssemblyAngularVelocity=Vector3.zero
+      task.wait(.1)
+      local current=box:GetBoundingBox()
+      if (current.Position-desired.Position).Magnitude<.8 then
+        task.wait(.1)
+        current=box:GetBoundingBox()
+        if (current.Position-desired.Position).Magnitude<.8 then return desired end
+      end
+      if hasBoxControl(box)~=true then dragging:FireServer(box) end
+      task.wait(.1)
+    end
+    error("Could not keep the shop box on the checkout counter")
+  end
+  local function moveBoughtToPlot(box)
+    local part=box.PrimaryPart or box:FindFirstChildWhichIsA("BasePart",true)
+    if not part then return false end
+    status("Bringing purchased box back to the plot...")
+    local bound,size=box:GetBoundingBox()
+    local desired=CFrame.new(hit+Vector3.new(0,size.Y/2+.15,0))
+    local target=desired*bound:ToObjectSpace(box:GetPivot())
+    if CodexItemTP.eligible(box) then
+      return CodexItemTP.move(box,target,function() return stopped or not statusGui.Parent or not box.Parent end)
+    end
+    local control=hasBoxControl(box)
+    for attempt=1,3 do
+      if not box.Parent then return false end
+      if control==false or attempt>1 and control~=true then
+        status("Reclaiming purchased box for the plot move...")
+        __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(part.Position+Vector3.new(0,2,3))
+        task.wait(.1)
+        dragging:FireServer(box)
+        if requestOwnership then requestOwnership:FireServer(part.AssemblyRootPart or part) end
+        task.wait(.1)
+        control=hasBoxControl(box)
+      end
+      pcall(function() box:PivotTo(target) end)
+      part.AssemblyLinearVelocity=Vector3.zero
+      part.AssemblyAngularVelocity=Vector3.zero
+      task.wait(.1)
+      local current=box:GetBoundingBox()
+      if (current.Position-desired.Position).Magnitude<1 then
+        __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(hit+Vector3.new(0,3,3))
+        if hasBoxControl(box)==false then dragging:FireServer(box) end
+        return true
+      end
+      control=false
+    end
+    return false
+  end
+  local function prepareBoughtForPlacement(box,id)
+    local remaining=nextPlacementAt-os.clock()
+    if remaining>0 then
+      status("Placement cooldown "..string.format("%.2f",remaining).."s; moving "..id.." to the base...")
+      if not moveBoughtToPlot(box) then
+        warn("Wire Atelier bought "..id.." but could not move its box to the plot; trying placement with the purchased box")
+      end
+    else
+      status("Purchase confirmed: "..id.."; placing directly from the purchased box...")
+    end
+  end
+  local function buyOne(id)
+    local price=infoRoot[id].Price.Value
+    assert(player.leaderstats.Money.Value>=price,"Need "..price.." cash to buy one "..id.." box")
+    local box=nil
+    for attempt=1,360 do
+      box=stockBox(id)
+      if box then break end
+      if attempt%40==0 then status("Waiting for "..id.." to restock ("..math.floor(attempt/4).."s)...") end
+      task.wait(.25)
+    end
+    assert(box,"No shop stock for "..id.." after 90 seconds; check stock or choose another color")
+    local part=box.PrimaryPart
+    status("Going to the "..id.." stock box...")
+    __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(box.PrimaryPart.Position+Vector3.new(0,2,3))
+    task.wait(.1)
+    local counter,npc,head=shopFor(box)
+    if hasBoxControl(box)==false then dragging:FireServer(box);task.wait(.1) end
+    for attempt=1,30 do
+      if boxOwner(box) and boxOwner(box).Value==player then break end
+      if attempt%4==0 then
+        if requestOwnership then requestOwnership:FireServer(part.AssemblyRootPart or part) end
+        dragging:FireServer(box)
+      end
+      task.wait(.1)
+    end
+    assert(boxOwner(box) and boxOwner(box).Value==player,"Could not take ownership of store box "..id)
+    status("Dragging "..id.." to the buy pad...")
+    local destination=dragToPad(box,counter)
+    __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(counter.Position+Vector3.new(0,2,3))
+    task.wait(.1)
+    if hasBoxControl(box)~=true then dragging:FireServer(box);task.wait(.1) end
+    local before={}
+    for _,model in ipairs(workspace.PlayerModels:GetChildren()) do before[model]=true end
+    local npcInfo=nil
+    pcall(function() invokeBounded(chattingValue,1.5,0) end)
+    local connection=promptChat.OnClientEvent:Connect(function(active,info)
+      if active and info and info.Character==npc and info.ID then npcInfo=info end
+    end)
+    __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(head.Position+Vector3.new(0,0,3))
+    task.wait(.1)
+    for attempt=1,3 do
+      if npcInfo then break end
+      promptChat:FireServer(true,npc)
+      for tick=1,20 do if npcInfo then break end;task.wait(.05) end
+    end
+    connection:Disconnect()
+    assert(npcInfo,"Cashier prompt did not arrive for "..id.."; store may be closed")
+    local moneyBefore=player.leaderstats.Money.Value
+    status("Buying "..id.." at the cashier...")
+    pcall(function() invokeBounded(chattingValue,1.5,1) end)
+    task.wait(.1)
+    local purchaseOk,purchaseError=pcall(function()
+      local first,tries=nil,0
+      while tries<4 do
+        tries=tries+1
+        first=invokeBounded(chatting,8,npcInfo,"Initiate")
+        if first then break end
+        status("Waiting for cashier to see "..id.." on the counter ("..tries..")...")
+        if tries%2==0 then
+          local control=hasBoxControl(box)
+          if control~=true then
+            assert(box.PrimaryPart,"Stock box disappeared before checkout")
+            __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(box.PrimaryPart.Position+Vector3.new(0,2,3))
+            task.wait(.1)
+            dragging:FireServer(box)
+            if requestOwnership then requestOwnership:FireServer(box.PrimaryPart.AssemblyRootPart or box.PrimaryPart) end
+            task.wait(.1)
+          end
+          destination=dragToPad(box,counter)
+          __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=CFrame.new(head.Position+Vector3.new(0,0,3))
+          task.wait(.1)
+        else
+          task.wait(math.min(.12+tries*.04,.3))
+        end
+      end
+      local region=counter.CFrame*CFrame.new(0,counter.Size.Y/2+.3,0)
+      local selected=false
+      local parts=workspace:GetPartBoundsInBox(region,Vector3.new(counter.Size.X,.6,counter.Size.Z))
+      for _,piece in ipairs(parts) do
+        if piece:IsDescendantOf(box) then
+          selected=true
+        else
+          local other=piece.Parent
+          if other and other:IsA("Model") and other~=box and boxOwner(other) and boxItem(other,false) then
+            error("Another shop box is on the cashier counter; stopped before confirming a purchase")
+          end
+        end
+      end
+      assert(selected and boxOwner(box) and boxOwner(box).Value==player,"Selected "..id.." box is not safely on the cashier counter")
+      if not first then status("Cashier response was empty; checking the selected box once...") end
+      task.wait(.05)
+      local current=box:GetBoundingBox()
+      assert((current.Position-destination.Position).Magnitude<1,"Shop box moved off the buy pad before confirmation")
+      local result=invokeBounded(chatting,8,npcInfo,"ConfirmPurchase")
+      assert(result,"Cashier did not confirm the purchase of "..id)
+    end)
+    pcall(function() invokeBounded(chatting,1.5,npcInfo,"EndChat") end)
+    pcall(function() invokeBounded(chattingValue,1.5,0) end)
+    for attempt=1,60 do
+      local owned=purchasedBox(id,box,before)
+      if owned then
+        prepareBoughtForPlacement(owned,id)
+        return owned
+      end
+      task.wait(.05)
+    end
+    if not purchaseOk then error(purchaseError) end
+    error("Purchase of "..id.." was not confirmed; cash before: "..moneyBefore..", now: "..player.leaderstats.Money.Value)
+  end
+  buyMissing=function(id)
+    status("Buying missing "..id.." box at the store...")
+    local oldPosition=rootPart.CFrame
+    local ok,result=pcall(buyOne,id)
+    __HuxGhost:BeforeTeleport(rootPart); rootPart.CFrame=oldPosition
+    if not ok then purchaseHalted=tostring(result);error(result) end
+    print("Wire Atelier bought",id,"for",infoRoot[id].Price.Value)
+    return result
+  end
+end
+local boxIsParented=placeRoot:FindFirstChild("BoxIsParented")
+local progress=placementStore.WireAtelierProgress
+if not progress or progress.planJson~=planJson or (progress.hit-hit).Magnitude>.01 or (progress.horizontal-horizontal).Magnitude>.01 then
+  progress={planJson=planJson,hit=hit,horizontal=horizontal,done={},failed={}}
+  placementStore.WireAtelierProgress=progress
+end
+local tally={placed=0,pending=0,retried=0,failed=0,skipped=0}
+local totalPlacements=TEAM_ROLE=="worker" and 0 or #jobs+#switches
+local function report(action)
+  status(action.." | placed "..tally.placed.."/"..totalPlacements.." pending "..tally.pending.." retried "..tally.retried.." failed "..tally.failed)
+end
+local function modelHasValue(model,class,name,wanted)
+  local named=model:FindFirstChild(name)
+  if named and named:IsA(class) and named.Value==wanted then return true end
+  for _,child in ipairs(model:GetChildren()) do
+    if child:IsA(class) and child.Value==wanted then return true end
+  end
+  return false
+end
+local function nearbyModels(position)
+  local models,seen={},{}
+  local ok,parts=pcall(function() return workspace:GetPartBoundsInRadius(position,.55) end)
+  if ok then
+    for _,part in ipairs(parts) do
+      local model=part.Parent
+      if model and model:IsA("Model") and not seen[model] then
+        seen[model]=true;table.insert(models,model)
+      end
+    end
+  else
+    for _,instance in ipairs(workspace:GetDescendants()) do
+      if instance:IsA("Model") then table.insert(models,instance) end
+    end
+  end
+  return models
+end
+local function hasEndAt(model,name,position)
+  local named=model:FindFirstChild(name)
+  if named and named:IsA("BasePart") and (named.Position-position).Magnitude<=.18 then return true end
+  for _,child in ipairs(model:GetChildren()) do
+    if child:IsA("BasePart") and (child.Position-position).Magnitude<=.12 then return true end
+  end
+  return false
+end
+local function findPlacedWire(job)
+  local first,last=job.points[1],job.points[#job.points]
+  for _,model in ipairs(nearbyModels(first)) do
+    local own=boxOwner(model)
+    if own and own.Value==owner and modelHasValue(model,"StringValue","ItemName",job.id)
+      and modelHasValue(model,"StringValue","Type","Wire")
+      and hasEndAt(model,"End1",first) and hasEndAt(model,"End2",last) then
+      return model
+    end
+  end
+end
+local function findPlacedLever(sw,position)
+  for _,model in ipairs(nearbyModels(position)) do
+    local own=boxOwner(model)
+    if own and own.Value==owner and modelHasValue(model,"StringValue","ItemName","Lever0")
+      and model.PrimaryPart and (model.PrimaryPart.Position-position).Magnitude<=.35 then
+      return model
+    end
+  end
+end
+local function waitForModel(find,seconds)
+  local deadline=os.clock()+seconds
+  repeat
+    local model=find()
+    if model then return model end
+    task.wait(.1)
+  until os.clock()>=deadline
+  return find()
+end
+local function takeBox(id)
+  local list=boxes[id] or {}
+  while #list>0 do
+    local box=table.remove(list)
+    local own=boxOwner(box)
+    if box.Parent and own and own.Value==player then return box end
+  end
+  if purchaseHalted then error("Automatic checkout paused: "..purchaseHalted) end
+  if not buyMissing then return nil,"No owned "..id.." box on the target plot" end
+  local ok,err=pcall(buyMissing,id)
+  if not ok then
+    purchaseHalted=tostring(err)
+    error("Automatic checkout paused after one failed purchase: "..purchaseHalted)
+  end
+  local bought=boxes[id] and table.remove(boxes[id])
+  if bought and bought.Parent then return bought end
+  return nil,"Purchase did not yield a usable "..id.." box"
+end
+local function placeVerified(key,id,find,send)
+  if stopped or not statusGui.Parent then error("Stopped") end
+  if find() then
+    tally.placed=tally.placed+1;tally.skipped=tally.skipped+1
+    progress.done[key]=true;progress.failed[key]=nil
+    report("Already placed "..id)
+    return true
+  end
+  local box,reason=takeBox(id)
+  if not box then
+    tally.failed=tally.failed+1;progress.failed[key]=reason
+    report("Needs box: "..id);return false
+  end
+  local parent=box.Parent
+  local requestable,requests=true,0
+  local pendingReason
+  local ok,_,why=CodexPlacing.run({
+    timeout=15,interval=.12,
+    cancelled=function()return stopped or not statusGui.Parent end,
+    ready=function()return requestable end,
+    observe=find,
+    waitRate=function()
+      local remaining=nextPlacementAt-os.clock()
+      if remaining>0 then task.wait(remaining) end
+      if find() then return true end
+      if requests>0 then
+        local checked,exists=false,false
+        if boxIsParented then checked,exists=pcall(function()return boxIsParented:InvokeServer(box,parent)end) end
+        requestable=checked and exists==true
+        if requestable then
+          pcall(function()if not box.Parent then box.Parent=parent end end)
+        else
+          pendingReason="Source consumed or pending; waiting for matching geometry"
+        end
+      end
+      return true
+    end,
+    onAttempt=function(attempt)
+      tally.pending=1
+      if attempt>1 then tally.retried=tally.retried+1 end
+      report("Sending "..id.." attempt "..attempt)
+    end,
+    send=function()
+      requests=requests+1
+      box.Parent=nil
+      send(box)
+      nextPlacementAt=os.clock()+MIN_PLACEMENT_INTERVAL
+    end,
+  })
+  tally.pending=0
+  if ok then
+    tally.placed=tally.placed+1;progress.done[key]=true;progress.failed[key]=nil
+    report("Confirmed "..id);return true
+  end
+  if requestable then pcall(function()if not box.Parent then box.Parent=parent end end) end
+  tally.failed=tally.failed+1;progress.failed[key]=pendingReason or why
+  report("Could not verify "..id)
+  return false
+end
+if TEAM_ROLE=="worker" then
+  status("Helper ready. Waiting for wire requests from the plot owner...")
+  while not stopped and statusGui.Parent do
+    local response=teamPost("next")
+    if response.stopped then break end
+    if response.job then
+      local command=response.job
+      local key,id=command.key,command.id
+      totalPlacements=totalPlacements+1
+      local ok,placed=pcall(function()
+        local info=infoRoot:FindFirstChild(id)
+        assert(info and info:FindFirstChild("OtherInfo"),"Missing wire item definition "..id)
+        local points,total={},0
+        for _,q in ipairs(command.points) do table.insert(points,Vector3.new(q[1],q[2],q[3])) end
+        for section=2,#points do
+          local length=(points[section]-points[section-1]).Magnitude
+          assert(length>=.41-.0001,"Requested wire has a section below 0.41 studs")
+          total=total+length
+        end
+        assert(total<=MAX_WIRE_LENGTH+.0001,"Requested wire exceeds the 60-stud cap")
+        for _,point in ipairs(points) do
+          local allowed,found=CanPlace:CanPlace(player,point,{Land=land,PermissionType=permissions})
+          assert(allowed and found==owner,"Requested wire is not on the permitted leader plot")
+        end
+        local job={id=id,points=points,kind="delegated art"}
+        return placeVerified(key,id,function() return findPlacedWire(job) end,function(itemBox)
+          placedWire:FireServer(info,points,owner,itemBox,true)
+        end)
+      end)
+      local reason=ok and (progress.failed[key] or "") or tostring(placed)
+      teamPost("result",{key=key,placed=ok and placed==true,reason=reason})
+      status((ok and placed and "Verified " or "Could not place ")..id.." for the plot owner")
+      if purchaseHalted then error("Automatic checkout paused: "..purchaseHalted) end
+    else
+      task.wait(.35)
+    end
+  end
+else
+  local function delegated(id)
+    if TEAM_ROLE~="leader" then return false end
+    for _,wanted in ipairs(TEAM_FILTER) do if wanted=="*" or wanted==id then return true end end
+    return false
+  end
+  for n,job in ipairs(jobs) do
+    local key="wire:"..n..":"..job.id
+    local info=infoRoot:FindFirstChild(job.id)
+    if not info then
+      tally.failed=tally.failed+1;progress.failed[key]="Missing item definition "..job.id
+    elseif delegated(job.id) then
+      if findPlacedWire(job) then
+        tally.placed=tally.placed+1;tally.skipped=tally.skipped+1;progress.done[key]=true;progress.failed[key]=nil
+        report("Already placed "..job.id)
+      else
+        local coordinates={}
+        for _,point in ipairs(job.points) do table.insert(coordinates,{point.X,point.Y,point.Z}) end
+        teamPost("enqueue",{job={key=key,id=job.id,points=coordinates}})
+        local result=nil
+        for attempt=1,1200 do
+          result=teamPost("resultGet",{key=key}).result
+          if result then break end
+          if stopped or not statusGui.Parent then error("Stopped") end
+          if attempt%20==0 then report("Waiting for helper: "..job.id) end
+          task.wait(.25)
+        end
+        assert(result,"Helper did not answer wire "..n..". The request remains pending; resume only after checking both accounts.")
+        if result.placed and waitForModel(function() return findPlacedWire(job) end,3) then
+          tally.placed=tally.placed+1;progress.done[key]=true;progress.failed[key]=nil
+          report("Helper placed "..job.id)
+        else
+          tally.failed=tally.failed+1;progress.failed[key]=result.reason~="" and result.reason or "Helper did not verify the placed wire"
+          report("Helper could not place "..job.id)
+          if string.find(progress.failed[key],"Automatic checkout paused",1,true) then error(progress.failed[key]) end
+        end
+      end
+    else
+      placeVerified(key,job.id,function() return findPlacedWire(job) end,function(itemBox)
+        placedWire:FireServer(info,job.points,owner,itemBox,true)
+      end)
+    end
+  end
+  local leverInfo=infoRoot:FindFirstChild("Lever0")
+  assert(leverInfo and leverInfo:FindFirstChild("Model"),"Lever0 item definition is missing")
+  local template=leverInfo.Model
+  local output=template:FindFirstChild("Output",true)
+  assert(template.PrimaryPart and output,"Lever0 output geometry is missing")
+  local outputOffset=output.Position-template.PrimaryPart.Position
+  for n,sw in ipairs(switches) do
+    local cf=CFrame.new(sw.position-outputOffset)*template.PrimaryPart.CFrame.Rotation
+    placeVerified("lever:"..n,"Lever0",function() return findPlacedLever(sw,cf.Position) end,function(itemBox)
+      placedStructure:FireServer("Lever0",cf,owner,nil,itemBox,false,true)
+    end)
+  end
+  if TEAM_ROLE=="leader" then teamPost("stop") end
+end
+print("Wire Atelier verified",tally.placed,"placements; skipped",tally.skipped,"already present; retried",tally.retried,"failed",tally.failed)
+status("Verified "..tally.placed.."/"..totalPlacements.." | pending "..tally.pending.." retried "..tally.retried.." failed "..tally.failed)
+if tally.failed==0 then placementStore.WireAtelierPlacement=nil end
+end
+local ok,err=xpcall(function() return ToolMixins.Ghost:Scope(run) end,function(message) return tostring(message) end)
+if not ok then
+  status("Stopped: "..tostring(err):sub(1,180))
+  warn("Wire Atelier stopped: "..tostring(err))
+end
